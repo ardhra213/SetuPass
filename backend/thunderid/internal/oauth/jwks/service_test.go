@@ -1,0 +1,357 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package jwks
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"errors"
+	"testing"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/cryptolib"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+	"github.com/thunder-id/thunderid/tests/mocks/crypto/cryptomock"
+)
+
+type JWKSServiceTestSuite struct {
+	suite.Suite
+	jwksService JWKSServiceInterface
+	cryptoMock  *cryptomock.RuntimeCryptoProviderMock
+}
+
+func TestJWKSServiceSuite(t *testing.T) {
+	suite.Run(t, new(JWKSServiceTestSuite))
+}
+
+func (suite *JWKSServiceTestSuite) SetupTest() {
+	suite.cryptoMock = cryptomock.NewRuntimeCryptoProviderMock(suite.T())
+	suite.jwksService = newJWKSService(suite.cryptoMock)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_RSA_Success() {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	info := providers.PublicKeyInfo{
+		KeyID:          "kid-1",
+		Algorithm:      string(cryptolib.AlgorithmRS256),
+		PublicKey:      &key.PublicKey,
+		Thumbprint:     "kid-1",
+		CertificateDER: []byte("rsa-cert-raw"),
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{info}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+	k := resp.Keys[0]
+	assert.Equal(suite.T(), "RSA", k.Kty)
+	assert.Equal(suite.T(), "RS256", k.Alg)
+	assert.NotEmpty(suite.T(), k.N)
+	assert.NotEmpty(suite.T(), k.E)
+	assert.NotEmpty(suite.T(), k.X5c)
+	assert.NotEmpty(suite.T(), k.X5t)
+	assert.NotEmpty(suite.T(), k.X5tS256)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_ECDSA_P256_Success() {
+	ecdsaKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	info := providers.PublicKeyInfo{
+		KeyID:          "kid-1",
+		Algorithm:      string(cryptolib.AlgorithmES256),
+		PublicKey:      &ecdsaKey.PublicKey,
+		Thumbprint:     "kid-1",
+		CertificateDER: []byte("ec-cert-raw"),
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{info}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+	k := resp.Keys[0]
+	assert.Equal(suite.T(), "EC", k.Kty)
+	assert.Equal(suite.T(), "ES256", k.Alg)
+	assert.Equal(suite.T(), "P-256", k.Crv)
+	assert.NotEmpty(suite.T(), k.X)
+	assert.NotEmpty(suite.T(), k.Y)
+	assert.NotEmpty(suite.T(), k.X5c)
+	assert.NotEmpty(suite.T(), k.X5t)
+	assert.NotEmpty(suite.T(), k.X5tS256)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_EdDSA_Success() {
+	_, edPriv, _ := ed25519.GenerateKey(rand.Reader)
+	info := providers.PublicKeyInfo{
+		KeyID:          "kid-1",
+		Algorithm:      string(cryptolib.AlgorithmEdDSA),
+		PublicKey:      edPriv.Public(),
+		Thumbprint:     "kid-1",
+		CertificateDER: []byte("ed-cert-raw"),
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{info}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+	k := resp.Keys[0]
+	assert.Equal(suite.T(), "OKP", k.Kty)
+	assert.Equal(suite.T(), "EdDSA", k.Alg)
+	assert.Equal(suite.T(), "Ed25519", k.Crv)
+	assert.NotEmpty(suite.T(), k.X)
+	assert.NotEmpty(suite.T(), k.X5c)
+	assert.NotEmpty(suite.T(), k.X5t)
+	assert.NotEmpty(suite.T(), k.X5tS256)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_MLDSA_Success() {
+	signer, err := cryptolib.GenerateMLDSAKey(cryptolib.AlgorithmMLDSA65)
+	assert.NoError(suite.T(), err)
+	info := providers.PublicKeyInfo{
+		KeyID:          "kid-1",
+		Algorithm:      string(cryptolib.AlgorithmMLDSA65),
+		PublicKey:      signer.Public(),
+		Thumbprint:     "kid-1",
+		CertificateDER: []byte("mldsa-cert-raw"),
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{info}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+	k := resp.Keys[0]
+	assert.Equal(suite.T(), "AKP", k.Kty)
+	assert.Equal(suite.T(), "ML-DSA-65", k.Alg)
+	assert.Equal(suite.T(), "sig", k.Use)
+	assert.NotEmpty(suite.T(), k.Pub)
+	assert.Empty(suite.T(), k.Crv)
+	assert.Empty(suite.T(), k.X)
+	assert.NotEmpty(suite.T(), k.X5c)
+	assert.NotEmpty(suite.T(), k.X5t)
+	assert.NotEmpty(suite.T(), k.X5tS256)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetMLDSAPublicKeyJWKS_NonMLDSAKey() {
+	ecdsaKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	_, ok := getMLDSAPublicKeyJWKS(&ecdsaKey.PublicKey, "kid-1", "", nil, "", "")
+	assert.False(suite.T(), ok)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_GetPublicKeysError() {
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return(nil, errors.New("provider error"))
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), resp)
+	assert.NotNil(suite.T(), svcErr)
+	assert.Equal(suite.T(), tidcommon.InternalServerError.Code, svcErr.Code)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_NoCertificatesFound() {
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), resp)
+	assert.NotNil(suite.T(), svcErr)
+	assert.Equal(suite.T(), tidcommon.InternalServerError.Code, svcErr.Code)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_UnsupportedPublicKeyType() {
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	keys := []providers.PublicKeyInfo{
+		{
+			KeyID:      "kid-1",
+			PublicKey:  "unsupported-key-type",
+			Thumbprint: "kid-1",
+		},
+		{
+			KeyID:          "kid-2",
+			Algorithm:      string(cryptolib.AlgorithmRS256),
+			PublicKey:      &rsaKey.PublicKey,
+			Thumbprint:     "kid-2",
+			CertificateDER: []byte("rsa-cert-raw"),
+		},
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return(keys, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_OnlyUnsupportedKeys() {
+	keys := []providers.PublicKeyInfo{
+		{KeyID: "kid-1", PublicKey: "unsupported-key-type", Thumbprint: "kid-1"},
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return(keys, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), resp)
+	assert.NotNil(suite.T(), svcErr)
+	assert.Equal(suite.T(), tidcommon.InternalServerError.Code, svcErr.Code)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_EmptyKeyID() {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	keys := []providers.PublicKeyInfo{
+		{
+			KeyID:      "",
+			Algorithm:  string(cryptolib.AlgorithmRS256),
+			PublicKey:  &key.PublicKey,
+			Thumbprint: "kid-1",
+		},
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return(keys, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), resp)
+	assert.NotNil(suite.T(), svcErr)
+	assert.Equal(suite.T(), tidcommon.InternalServerError.Code, svcErr.Code)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_MultipleCertificates() {
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	ecdsaKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	keys := []providers.PublicKeyInfo{
+		{
+			KeyID:          "rsa-kid",
+			Algorithm:      string(cryptolib.AlgorithmRS256),
+			PublicKey:      &rsaKey.PublicKey,
+			Thumbprint:     "rsa-kid",
+			CertificateDER: []byte("rsa-cert-raw"),
+		},
+		{
+			KeyID:          "ec-kid",
+			Algorithm:      string(cryptolib.AlgorithmES256),
+			PublicKey:      &ecdsaKey.PublicKey,
+			Thumbprint:     "ec-kid",
+			CertificateDER: []byte("ec-cert-raw"),
+		},
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return(keys, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 2)
+
+	rsaFound := false
+	ecFound := false
+	for _, k := range resp.Keys {
+		if k.Kty == "RSA" {
+			rsaFound = true
+			assert.Equal(suite.T(), "RS256", k.Alg)
+		}
+		if k.Kty == "EC" {
+			ecFound = true
+			assert.Equal(suite.T(), "ES256", k.Alg)
+		}
+	}
+	assert.True(suite.T(), rsaFound, "RSA key not found in JWKS")
+	assert.True(suite.T(), ecFound, "EC key not found in JWKS")
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_ECDSA_AdditionalCurves() {
+	tests := []struct {
+		name  string
+		curve elliptic.Curve
+		alg   cryptolib.Algorithm
+		crv   string
+	}{
+		{name: "P-384", curve: elliptic.P384(), alg: cryptolib.AlgorithmES384, crv: "P-384"},
+		{name: "P-521", curve: elliptic.P521(), alg: cryptolib.AlgorithmES512, crv: "P-521"},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.name, func() {
+			ecdsaKey, _ := ecdsa.GenerateKey(tt.curve, rand.Reader)
+			info := providers.PublicKeyInfo{
+				KeyID:          "kid-" + tt.name,
+				Algorithm:      string(tt.alg),
+				PublicKey:      &ecdsaKey.PublicKey,
+				Thumbprint:     "kid-" + tt.name,
+				CertificateDER: []byte("ec-cert-raw-" + tt.name),
+			}
+			suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+				Return([]providers.PublicKeyInfo{info}, nil).Once()
+
+			resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+			assert.Nil(suite.T(), svcErr)
+			assert.NotNil(suite.T(), resp)
+			assert.Len(suite.T(), resp.Keys, 1)
+			k := resp.Keys[0]
+			assert.Equal(suite.T(), "EC", k.Kty)
+			assert.Equal(suite.T(), string(tt.alg), k.Alg)
+			assert.Equal(suite.T(), tt.crv, k.Crv)
+			assert.NotEmpty(suite.T(), k.X)
+			assert.NotEmpty(suite.T(), k.Y)
+		})
+	}
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_RSA_ZeroExponent() {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	key.PublicKey.E = 0
+	info := providers.PublicKeyInfo{
+		KeyID:          "kid-zero",
+		Algorithm:      string(cryptolib.AlgorithmRS256),
+		PublicKey:      &key.PublicKey,
+		Thumbprint:     "kid-zero",
+		CertificateDER: []byte("rsa-cert-raw-zero"),
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{info}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+	k := resp.Keys[0]
+	assert.Equal(suite.T(), "RSA", k.Kty)
+	assert.Equal(suite.T(), "AA", k.E)
+}
+
+func (suite *JWKSServiceTestSuite) TestGetJWKS_NoCertificateDER() {
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	info := providers.PublicKeyInfo{
+		KeyID:      "kid-1",
+		Algorithm:  string(cryptolib.AlgorithmRS256),
+		PublicKey:  &rsaKey.PublicKey,
+		Thumbprint: "kid-1",
+		// CertificateDER intentionally nil
+	}
+	suite.cryptoMock.EXPECT().GetPublicKeys(mock.Anything, providers.PublicKeyFilter{}).
+		Return([]providers.PublicKeyInfo{info}, nil)
+
+	resp, svcErr := suite.jwksService.GetJWKS(context.Background())
+	assert.Nil(suite.T(), svcErr)
+	assert.NotNil(suite.T(), resp)
+	assert.Len(suite.T(), resp.Keys, 1)
+	k := resp.Keys[0]
+	assert.Equal(suite.T(), "RSA", k.Kty)
+	assert.Empty(suite.T(), k.X5c)
+	assert.Empty(suite.T(), k.X5t)
+	assert.Empty(suite.T(), k.X5tS256)
+}

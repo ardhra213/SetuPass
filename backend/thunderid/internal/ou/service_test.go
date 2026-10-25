@@ -1,0 +1,3278 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package ou
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/config"
+	serverconst "github.com/thunder-id/thunderid/internal/system/constants"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+	"github.com/thunder-id/thunderid/internal/system/sysauthz"
+	"github.com/thunder-id/thunderid/internal/system/utils"
+	"github.com/thunder-id/thunderid/tests/mocks/sysauthzmock"
+)
+
+// stubDependencyRegistry is a minimal resourcedependency.Registry for delete tests.
+type stubDependencyRegistry struct {
+	resp *resourcedependency.DependenciesResponse
+	err  error
+}
+
+func (s *stubDependencyRegistry) RegisterProvider(resourcedependency.Provider) {}
+
+func (s *stubDependencyRegistry) GetDependencies(
+	context.Context, string, string) (*resourcedependency.DependenciesResponse, error) {
+	return s.resp, s.err
+}
+
+func (s *stubDependencyRegistry) CascadeDelete(context.Context, string, string) (int, error) {
+	return 0, nil
+}
+
+func (s *stubDependencyRegistry) ValidateReferenceUpdate(
+	context.Context, string, string) *tidcommon.ServiceError {
+	return nil
+}
+
+type OrganizationUnitServiceTestSuite struct {
+	suite.Suite
+}
+
+var testParentID = "parent"
+var testOUID = "ou-1"
+var testMidID = "mid-1"
+var testGrandID = "grand"
+
+func TestOUService_OrganizationUnitServiceTestSuite_Run(t *testing.T) {
+	suite.Run(t, new(OrganizationUnitServiceTestSuite))
+}
+
+func (suite *OrganizationUnitServiceTestSuite) SetupTest() {
+	// Initialize server runtime with declarative mode disabled by default
+	config.ResetServerRuntime()
+	testConfig := &config.Config{
+		DeclarativeResources: config.DeclarativeResources{
+			Enabled: false,
+		},
+	}
+	_ = config.InitializeServerRuntime("/tmp/test", testConfig)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TearDownTest() {
+	config.ResetServerRuntime()
+}
+
+type ouListExpectations struct {
+	totalResults int
+	count        int
+	startIndex   int
+	handles      []string
+	linkRels     []string
+	linkHrefs    []string
+}
+
+type pathListTestConfig[Resp any] struct {
+	invalidPath    string
+	validPath      string
+	validPathSlice []string
+	limit          int
+	offset         int
+	setupSuccess   func(*organizationUnitStoreInterfaceMock)
+	assertSuccess  func(Resp)
+	invoke         func(*organizationUnitService, string, int, int) (Resp, *tidcommon.ServiceError)
+}
+
+type pathListInvoker[Resp any] func(*organizationUnitService, string, int, int) (Resp, *tidcommon.ServiceError)
+
+// runOUPathListTests de-duplicates the repeated path-based list scenarios across children/users/groups.
+func runOUPathListTests[Resp any](suite *OrganizationUnitServiceTestSuite, cfg pathListTestConfig[Resp]) {
+	suite.Run("invalid path", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		resp, err := cfg.invoke(service, cfg.invalidPath, cfg.limit, cfg.offset)
+
+		suite.Require().Nil(resp)
+		suite.Require().Equal(ErrorInvalidHandlePath, *err)
+		store.AssertNumberOfCalls(suite.T(), "GetOrganizationUnitByPath", 0)
+	})
+
+	suite.Run("not found", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, cfg.validPathSlice).
+			Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		resp, err := cfg.invoke(service, cfg.validPath, cfg.limit, cfg.offset)
+
+		suite.Require().Nil(resp)
+		suite.Require().Equal(ErrorOrganizationUnitNotFound, *err)
+	})
+
+	suite.Run("store error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, cfg.validPathSlice).
+			Return(providers.OrganizationUnit{}, errors.New("boom")).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		resp, err := cfg.invoke(service, cfg.validPath, cfg.limit, cfg.offset)
+
+		suite.Require().Nil(resp)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("success", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		if cfg.setupSuccess != nil {
+			cfg.setupSuccess(store)
+		}
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		resp, err := cfg.invoke(service, cfg.validPath, cfg.limit, cfg.offset)
+
+		suite.Require().Nil(err)
+		if cfg.assertSuccess != nil {
+			cfg.assertSuccess(resp)
+		} else {
+			suite.Require().NotNil(resp)
+		}
+	})
+}
+
+func setupDefaultPathSuccess(
+	store *organizationUnitStoreInterfaceMock,
+	limit, offset int,
+	listMethod string,
+	listReturn interface{},
+	countMethod string,
+	countReturn interface{},
+	extraArgs ...interface{},
+) {
+	store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+		Return(providers.OrganizationUnit{ID: "ou-1"}, nil).
+		Once()
+	store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+		Return(true, nil).
+		Once()
+	listArgs := []interface{}{mock.Anything, "ou-1", limit, offset}
+	listArgs = append(listArgs, extraArgs...)
+	store.On(listMethod, listArgs...).
+		Return(listReturn, nil).
+		Once()
+	countArgs := []interface{}{mock.Anything, "ou-1"}
+	countArgs = append(countArgs, extraArgs...)
+	store.On(countMethod, countArgs...).
+		Return(countReturn, nil).
+		Once()
+}
+
+func newDefaultPathListConfig[Resp any](
+	invalidPath string,
+	limit, offset int,
+	listMethod string,
+	listReturn interface{},
+	countMethod string,
+	countReturn interface{},
+	assert func(Resp),
+	invoker pathListInvoker[Resp],
+	extraListArgs ...interface{},
+) pathListTestConfig[Resp] {
+	return pathListTestConfig[Resp]{
+		invalidPath:    invalidPath,
+		validPath:      "root",
+		validPathSlice: []string{"root"},
+		limit:          limit,
+		offset:         offset,
+		setupSuccess: func(store *organizationUnitStoreInterfaceMock) {
+			setupDefaultPathSuccess(
+				store, limit, offset, listMethod, listReturn,
+				countMethod, countReturn, extraListArgs...)
+		},
+		assertSuccess: assert,
+		invoke:        invoker,
+	}
+}
+
+func invokeChildrenByPath(
+	service *organizationUnitService,
+	path string,
+	limit, offset int,
+) (*providers.OrganizationUnitListResponse, *tidcommon.ServiceError) {
+	return service.GetOrganizationUnitChildrenByPath(context.Background(), path, limit, offset, nil)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) newService(
+	store *organizationUnitStoreInterfaceMock,
+	authzService *sysauthzmock.SystemAuthorizationServiceInterfaceMock,
+) *organizationUnitService {
+	return suite.newServiceWithResolvers(store, authzService, nil, nil)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) newServiceWithResolvers(
+	store *organizationUnitStoreInterfaceMock,
+	authzService *sysauthzmock.SystemAuthorizationServiceInterfaceMock,
+	userResolver OUUserResolver,
+	groupResolver OUGroupResolver,
+) *organizationUnitService {
+	mtx := new(mockTransactioner)
+	mtx.On("Transact", mock.Anything, mock.Anything).Return(nil).Maybe()
+	return &organizationUnitService{
+		ouStore:       store,
+		authzService:  authzService,
+		transactioner: mtx,
+		userResolver:  userResolver,
+		groupResolver: groupResolver,
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) newServiceWithRoleResolver(
+	store *organizationUnitStoreInterfaceMock,
+	authzService *sysauthzmock.SystemAuthorizationServiceInterfaceMock,
+	roleResolver OURoleResolver,
+) *organizationUnitService {
+	mtx := new(mockTransactioner)
+	mtx.On("Transact", mock.Anything, mock.Anything).Return(nil).Maybe()
+	return &organizationUnitService{
+		ouStore:       store,
+		authzService:  authzService,
+		transactioner: mtx,
+		roleResolver:  roleResolver,
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) newServiceWithFlowResolver(
+	store *organizationUnitStoreInterfaceMock,
+	authzService *sysauthzmock.SystemAuthorizationServiceInterfaceMock,
+	flowResolver ouFlowResolver,
+) *organizationUnitService {
+	mtx := new(mockTransactioner)
+	mtx.On("Transact", mock.Anything, mock.Anything).Return(nil).Maybe()
+	return &organizationUnitService{
+		ouStore:       store,
+		authzService:  authzService,
+		transactioner: mtx,
+		flowResolver:  flowResolver,
+	}
+}
+
+type mockTransactioner struct {
+	mock.Mock
+}
+
+func (m *mockTransactioner) Transact(ctx context.Context, fn func(context.Context) error) error {
+	args := m.Called(ctx, fn)
+	if args.Get(0) == nil {
+		return fn(ctx)
+	}
+	return args.Error(0)
+}
+
+func newAllowAllAuthz(t interface {
+	mock.TestingT
+	Cleanup(func())
+}) *sysauthzmock.SystemAuthorizationServiceInterfaceMock {
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(t)
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(true, nil).Maybe()
+	authzMock.On("GetAccessibleResources", mock.Anything, mock.Anything, mock.Anything).
+		Return(&sysauthz.AccessibleResources{AllAllowed: true}, nil).Maybe()
+	return authzMock
+}
+
+func (suite *OrganizationUnitServiceTestSuite) assertOUListResponse(
+	resp *providers.OrganizationUnitListResponse,
+	expected *ouListExpectations,
+) {
+	suite.Require().NotNil(resp)
+	suite.Require().Equal(expected.totalResults, resp.TotalResults)
+	suite.Require().Equal(expected.count, resp.Count)
+	suite.Require().Equal(expected.startIndex, resp.StartIndex)
+	suite.Require().Len(resp.OrganizationUnits, len(expected.handles))
+	for idx, handle := range expected.handles {
+		suite.Require().Equal(handle, resp.OrganizationUnits[idx].Handle)
+	}
+	suite.Require().Len(resp.Links, len(expected.linkRels))
+	for idx := range expected.linkRels {
+		suite.Require().Equal(expected.linkRels[idx], resp.Links[idx].Rel)
+		suite.Require().Equal(expected.linkHrefs[idx], resp.Links[idx].Href)
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitList() {
+	testCases := []struct {
+		name       string
+		limit      int
+		offset     int
+		filterExpr *tidcommon.FilterGroup
+		setup      func(*organizationUnitStoreInterfaceMock)
+		wantErr    *tidcommon.ServiceError
+		wantResult *ouListExpectations
+	}{
+		{
+			name:   "success",
+			limit:  2,
+			offset: 1,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitListCount", mock.Anything, mock.Anything).
+					Return(3, nil).
+					Once()
+				store.On("GetOrganizationUnitList", mock.Anything, 2, 1, mock.Anything).
+					Return([]providers.OrganizationUnitBasic{
+						{ID: "ou-1", Handle: "root", Name: "Root"},
+						{ID: "ou-2", Handle: "child", Name: "Child"},
+					}, nil).
+					Once()
+			},
+			wantResult: &ouListExpectations{
+				totalResults: 3,
+				count:        2,
+				startIndex:   2,
+				handles:      []string{"root", "child"},
+				linkRels:     []string{"first", "prev", "last"},
+				linkHrefs: []string{
+					"/organization-units?offset=0&limit=2",
+					"/organization-units?offset=0&limit=2",
+					"/organization-units?offset=2&limit=2",
+				},
+			},
+		},
+		{
+			name:    "invalid pagination",
+			limit:   0,
+			offset:  0,
+			wantErr: &ErrorInvalidLimit,
+		},
+		{
+			name:   "invalid filter attribute",
+			limit:  5,
+			offset: 0,
+			filterExpr: &tidcommon.FilterGroup{Clauses: []tidcommon.FilterClause{
+				{Expr: tidcommon.FilterExpression{Attribute: "id", Operator: tidcommon.OperatorEq, Value: "ou-1"}},
+			}},
+			wantErr: &ErrorInvalidFilter,
+		},
+		{
+			name:   "count failure",
+			limit:  5,
+			offset: 0,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitListCount", mock.Anything, mock.Anything).
+					Return(0, errors.New("count failed")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:   "list failure",
+			limit:  5,
+			offset: 0,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitListCount", mock.Anything, mock.Anything).
+					Return(10, nil).
+					Once()
+				store.On("GetOrganizationUnitList", mock.Anything, 5, 0, mock.Anything).
+					Return(nil, errors.New("list failed")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.setup != nil {
+				tc.setup(store)
+			}
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			resp, err := service.GetOrganizationUnitList(context.Background(), tc.limit, tc.offset, tc.filterExpr)
+
+			if tc.wantErr != nil {
+				suite.Require().Nil(resp)
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.assertOUListResponse(resp, tc.wantResult)
+			}
+
+			if tc.wantErr == &ErrorInvalidLimit || tc.wantErr == &ErrorInvalidFilter {
+				store.AssertNumberOfCalls(suite.T(), "GetOrganizationUnitListCount", 0)
+			}
+			store.AssertExpectations(suite.T())
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_SetResolvers() {
+	service := &organizationUnitService{}
+
+	userResolver := new(OUUserResolverMock)
+	groupResolver := new(OUGroupResolverMock)
+	flowResolver := newOuFlowResolverMock(suite.T())
+
+	service.SetOUUserResolver(userResolver)
+	service.SetOUGroupResolver(groupResolver)
+	service.SetOUFlowResolver(flowResolver)
+
+	suite.Require().Equal(userResolver, service.userResolver)
+	suite.Require().Equal(groupResolver, service.groupResolver)
+	suite.Require().Equal(flowResolver, service.flowResolver)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_CreateOrganizationUnit() {
+	parentID := testParentOUID
+	validRequest := providers.OrganizationUnitRequestWithID{
+		Handle:      "finance",
+		Name:        "Finance",
+		Description: "desc",
+	}
+
+	testCases := []struct {
+		name    string
+		request providers.OrganizationUnitRequestWithID
+		setup   func(*organizationUnitStoreInterfaceMock)
+		wantErr *tidcommon.ServiceError
+	}{
+		{
+			name:    "invalid name",
+			request: providers.OrganizationUnitRequestWithID{Handle: "handle", Name: "  "},
+			wantErr: &ErrorInvalidRequestFormat,
+		},
+		{
+			name:    "invalid handle",
+			request: providers.OrganizationUnitRequestWithID{Handle: " ", Name: "Finance"},
+			wantErr: &ErrorInvalidRequestFormat,
+		},
+		{
+			name: "parent existence check error",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "finance",
+				Name:   "Finance",
+				Parent: &parentID,
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, parentID).
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "parent not found",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "finance",
+				Name:   "Finance",
+				Parent: &parentID,
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, parentID).
+					Return(false, nil).
+					Once()
+			},
+			wantErr: &ErrorParentOrganizationUnitNotFound,
+		},
+		{
+			name:    "name conflict error",
+			request: validRequest,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(true, nil).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNameConflict,
+		},
+		{
+			name:    "name conflict check failure",
+			request: validRequest,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, errors.New("name check failed")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:    "handle conflict",
+			request: validRequest,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(true, nil).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitHandleConflict,
+		},
+		{
+			name:    "handle conflict check failure",
+			request: validRequest,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(false, errors.New("handle check failed")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:    "create failure",
+			request: validRequest,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CreateOrganizationUnit", mock.Anything, mock.AnythingOfType("providers.OrganizationUnit")).
+					Return(errors.New("insert failed")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:    "success",
+			request: validRequest,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CreateOrganizationUnit", mock.Anything,
+					mock.MatchedBy(func(ou providers.OrganizationUnit) bool {
+						return ou.Name == "Finance" && ou.Handle == "finance"
+					})).
+					Return(nil).
+					Once()
+			},
+		},
+		{
+			name: "success with design fields",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle:                    "finance",
+				Name:                      "Finance",
+				ThemeID:                   "theme-123",
+				LayoutID:                  "layout-456",
+				AuthFlowID:                "auth-flow-123",
+				RegistrationFlowID:        "reg-flow-123",
+				IsRegistrationFlowEnabled: true,
+				RecoveryFlowID:            "recovery-flow-123",
+				IsRecoveryFlowEnabled:     true,
+				SignOutFlowID:             "signout-flow-123",
+				LogoURL:                   "https://example.com/logo.png",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(false, nil).
+					Once()
+				store.On("CreateOrganizationUnit", mock.Anything,
+					mock.MatchedBy(func(ou providers.OrganizationUnit) bool {
+						return ou.Name == "Finance" && ou.Handle == "finance" &&
+							ou.ThemeID == "theme-123" && ou.LayoutID == "layout-456" &&
+							ou.AuthFlowID == "auth-flow-123" &&
+							ou.RegistrationFlowID == "reg-flow-123" &&
+							ou.IsRegistrationFlowEnabled &&
+							ou.RecoveryFlowID == "recovery-flow-123" &&
+							ou.IsRecoveryFlowEnabled &&
+							ou.SignOutFlowID == "signout-flow-123" &&
+							ou.LogoURL == "https://example.com/logo.png"
+					})).
+					Return(nil).
+					Once()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.setup != nil {
+				tc.setup(store)
+			}
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			result, err := service.CreateOrganizationUnit(context.Background(), tc.request)
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().Equal(tc.request.Name, result.Name)
+				suite.Require().Equal(tc.request.Handle, result.Handle)
+				suite.Require().NotEmpty(result.ID)
+			}
+
+			if tc.wantErr == &ErrorInvalidRequestFormat {
+				store.AssertNumberOfCalls(suite.T(), "CheckOrganizationUnitNameConflict", 0)
+			}
+			store.AssertExpectations(suite.T())
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_CreateOrganizationUnit_InvalidDefaultFlow() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	flowResolver := newOuFlowResolverMock(suite.T())
+	flowResolver.On("IsValidFlow", mock.Anything, "bad-auth-flow", providers.FlowTypeAuthentication).
+		Return(false, nil).Once()
+
+	service := suite.newServiceWithFlowResolver(store, newAllowAllAuthz(suite.T()), flowResolver)
+	result, err := service.CreateOrganizationUnit(context.Background(), providers.OrganizationUnitRequestWithID{
+		Handle:     "finance",
+		Name:       "Finance",
+		AuthFlowID: "bad-auth-flow",
+	})
+
+	suite.Require().NotNil(err)
+	suite.Require().Equal(ErrorInvalidAuthFlowID, *err)
+	suite.Require().Equal(providers.OrganizationUnit{}, result)
+	store.AssertNumberOfCalls(suite.T(), "CheckOrganizationUnitNameConflict", 0)
+	store.AssertNumberOfCalls(suite.T(), "CreateOrganizationUnit", 0)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnit() {
+	testCases := []struct {
+		name    string
+		setup   func(*organizationUnitStoreInterfaceMock)
+		wantErr *tidcommon.ServiceError
+	}{
+		{
+			name: "success",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(providers.OrganizationUnit{ID: "ou-1", Name: "Root"}, nil).
+					Once()
+			},
+		},
+		{
+			name: "not found",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name: "store error",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(providers.OrganizationUnit{}, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			tc.setup(store)
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			result, err := service.GetOrganizationUnit(context.Background(), "ou-1")
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().Equal("ou-1", result.ID)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitByPath() {
+	testCases := []struct {
+		name    string
+		path    string
+		setup   func(*organizationUnitStoreInterfaceMock)
+		wantErr *tidcommon.ServiceError
+	}{
+		{
+			name:    "invalid path",
+			path:    "   ",
+			wantErr: &ErrorInvalidHandlePath,
+		},
+		{
+			name: "not found",
+			path: "/root/child/",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.
+					On("GetOrganizationUnitByPath", mock.Anything, []string{"root", "child"}).
+					Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name: "store error",
+			path: "root",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+					Return(providers.OrganizationUnit{}, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "success",
+			path: "root",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+					Return(providers.OrganizationUnit{ID: "ou-1", Handle: "root"}, nil).
+					Once()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.setup != nil {
+				tc.setup(store)
+			}
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			result, err := service.GetOrganizationUnitByPath(context.Background(), tc.path)
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().Equal("ou-1", result.ID)
+			}
+
+			if tc.wantErr == &ErrorInvalidHandlePath {
+				store.AssertNumberOfCalls(suite.T(), "GetOrganizationUnitByPath", 0)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_IsOrganizationUnitExists() {
+	testCases := []struct {
+		name    string
+		setup   func(*organizationUnitStoreInterfaceMock)
+		wantErr *tidcommon.ServiceError
+		want    bool
+	}{
+		{
+			name: "success",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).
+					Once()
+			},
+			want: true,
+		},
+		{
+			name: "store error",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			tc.setup(store)
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			result, err := service.IsOrganizationUnitExists(context.Background(), "ou-1")
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().Equal(tc.want, result)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_IsParent() {
+	parentID := "parent-1"
+	childID := "child-1"
+
+	suite.Run("returns true when IDs are equal", func() {
+		service := suite.newService(newOrganizationUnitStoreInterfaceMock(suite.T()), newAllowAllAuthz(suite.T()))
+
+		result, err := service.IsParent(context.Background(), parentID, parentID)
+
+		suite.Require().True(result)
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("returns true for direct parent", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnit", mock.Anything, childID).
+			Return(providers.OrganizationUnit{ID: childID, Parent: &parentID}, nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		result, err := service.IsParent(context.Background(), parentID, childID)
+
+		suite.Require().True(result)
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("returns true for ancestor", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnit", mock.Anything, childID).
+			Return(providers.OrganizationUnit{ID: childID, Parent: &testMidID}, nil).
+			Once()
+		store.On("GetOrganizationUnit", mock.Anything, "mid-1").
+			Return(providers.OrganizationUnit{ID: "mid-1", Parent: &parentID}, nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		result, err := service.IsParent(context.Background(), parentID, childID)
+
+		suite.Require().True(result)
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("returns false when parent not in hierarchy", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnit", mock.Anything, childID).
+			Return(providers.OrganizationUnit{ID: childID, Parent: &testMidID}, nil).
+			Once()
+		store.On("GetOrganizationUnit", mock.Anything, "mid-1").
+			Return(providers.OrganizationUnit{ID: "mid-1"}, nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		result, err := service.IsParent(context.Background(), parentID, childID)
+
+		suite.Require().False(result)
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("returns error when child not found", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnit", mock.Anything, childID).
+			Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		result, err := service.IsParent(context.Background(), parentID, childID)
+
+		suite.Require().False(result)
+		suite.Require().Equal(ErrorOrganizationUnitNotFound, *err)
+	})
+
+	suite.Run("returns error on store failure", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnit", mock.Anything, childID).
+			Return(providers.OrganizationUnit{}, errors.New("boom")).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		result, err := service.IsParent(context.Background(), parentID, childID)
+
+		suite.Require().False(result)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_UpdateOrganizationUnit() {
+	parentID := testParentID
+	tests := []struct {
+		name    string
+		id      string
+		request providers.OrganizationUnitRequestWithID
+		setup   func(*organizationUnitStoreInterfaceMock)
+		wantErr *tidcommon.ServiceError
+		assert  func(providers.OrganizationUnit)
+	}{
+		{
+			name: "success",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle:      "root",
+				Name:        "Root",
+				Description: "updated",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{
+					ID:          "ou-1",
+					Handle:      "root",
+					Name:        "Root",
+					Description: "old",
+				}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("UpdateOrganizationUnit", mock.Anything, mock.Anything).
+					Return(nil).
+					Once()
+			},
+			assert: func(ou providers.OrganizationUnit) {
+				suite.Equal("updated", ou.Description)
+			},
+		},
+		{
+			name: "success with design fields",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle:                    "root",
+				Name:                      "Root",
+				ThemeID:                   "theme-new",
+				LayoutID:                  "layout-new",
+				AuthFlowID:                "auth-flow-new",
+				RegistrationFlowID:        "reg-flow-new",
+				IsRegistrationFlowEnabled: true,
+				RecoveryFlowID:            "recovery-flow-new",
+				IsRecoveryFlowEnabled:     true,
+				SignOutFlowID:             "signout-flow-new",
+				LogoURL:                   "https://example.com/new-logo.png",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{
+					ID:                        "ou-1",
+					Handle:                    "root",
+					Name:                      "Root",
+					ThemeID:                   "theme-old",
+					LayoutID:                  "layout-old",
+					AuthFlowID:                "auth-flow-old",
+					RegistrationFlowID:        "reg-flow-old",
+					IsRegistrationFlowEnabled: false,
+					RecoveryFlowID:            "recovery-flow-old",
+					IsRecoveryFlowEnabled:     false,
+					SignOutFlowID:             "signout-flow-old",
+					LogoURL:                   "https://example.com/old-logo.png",
+				}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("UpdateOrganizationUnit", mock.Anything, mock.Anything).
+					Return(nil).
+					Once()
+			},
+			assert: func(ou providers.OrganizationUnit) {
+				suite.Equal("theme-new", ou.ThemeID)
+				suite.Equal("layout-new", ou.LayoutID)
+				suite.Equal("auth-flow-new", ou.AuthFlowID)
+				suite.Equal("reg-flow-new", ou.RegistrationFlowID)
+				suite.True(ou.IsRegistrationFlowEnabled)
+				suite.Equal("recovery-flow-new", ou.RecoveryFlowID)
+				suite.True(ou.IsRecoveryFlowEnabled)
+				suite.Equal("signout-flow-new", ou.SignOutFlowID)
+				suite.Equal("https://example.com/new-logo.png", ou.LogoURL)
+			},
+		},
+		{
+			name: "not found on fetch",
+			id:   "missing",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnit", mock.Anything, "missing").
+					Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name: "fetch failure",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(providers.OrganizationUnit{}, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "invalid handle",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: " ",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+			},
+			wantErr: &ErrorInvalidRequestFormat,
+		},
+		{
+			name: "parent existence check failure",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+				Parent: &parentID,
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("IsOrganizationUnitExists", mock.Anything, parentID).
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "parent not found",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+				Parent: &parentID,
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("IsOrganizationUnitExists", mock.Anything, parentID).
+					Return(false, nil).
+					Once()
+			},
+			wantErr: &ErrorParentOrganizationUnitNotFound,
+		},
+		{
+			name: "circular dependency",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+				Parent: &testOUID,
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).
+					Once()
+			},
+			wantErr: &ErrorCircularDependency,
+		},
+		{
+			name: "name conflict",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Finance",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(true, nil).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNameConflict,
+		},
+		{
+			name: "name conflict check failure",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Finance",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "handle conflict",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "finance",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(true, nil).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitHandleConflict,
+		},
+		{
+			name: "handle conflict check failure",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "finance",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "update returns not found",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("UpdateOrganizationUnit", mock.Anything, mock.AnythingOfType("providers.OrganizationUnit")).
+					Return(ErrOrganizationUnitNotFound).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name: "update failure",
+			id:   "ou-1",
+			request: providers.OrganizationUnitRequestWithID{
+				Handle: "root",
+				Name:   "Root",
+			},
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+				store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+					Return(existing, nil).
+					Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).
+					Once()
+				store.On("UpdateOrganizationUnit", mock.Anything, mock.AnythingOfType("providers.OrganizationUnit")).
+					Return(errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.setup != nil {
+				tc.setup(store)
+			}
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			result, err := service.UpdateOrganizationUnit(context.Background(), tc.id, tc.request)
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				if tc.assert != nil {
+					tc.assert(result)
+				}
+			}
+
+			store.AssertExpectations(suite.T())
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_UpdateOrganizationUnit_InvalidDefaultFlow() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+	store.On("GetOrganizationUnit", mock.Anything, "ou-1").
+		Return(existing, nil).
+		Once()
+	store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+		Return(false).
+		Once()
+
+	flowResolver := newOuFlowResolverMock(suite.T())
+	flowResolver.On("IsValidFlow", mock.Anything, "bad-signout-flow", providers.FlowTypeSignOut).
+		Return(false, nil).Once()
+
+	service := suite.newServiceWithFlowResolver(store, newAllowAllAuthz(suite.T()), flowResolver)
+	result, err := service.UpdateOrganizationUnit(context.Background(), "ou-1", providers.OrganizationUnitRequestWithID{
+		Handle:        "root",
+		Name:          "Root",
+		SignOutFlowID: "bad-signout-flow",
+	})
+
+	suite.Require().NotNil(err)
+	suite.Require().Equal(ErrorInvalidSignOutFlowID, *err)
+	suite.Require().Equal(providers.OrganizationUnit{}, result)
+	store.AssertNumberOfCalls(suite.T(), "UpdateOrganizationUnit", 0)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_UpdateOrganizationUnitByPath() {
+	request := providers.OrganizationUnitRequestWithID{Handle: "root", Name: "Root"}
+
+	suite.Run("invalid path", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		_, err := service.UpdateOrganizationUnitByPath(context.Background(), "   ", request)
+
+		suite.Require().Equal(ErrorInvalidHandlePath, *err)
+		store.AssertNumberOfCalls(suite.T(), "GetOrganizationUnitByPath", 0)
+	})
+
+	suite.Run("not found", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		_, err := service.UpdateOrganizationUnitByPath(context.Background(), "root", request)
+
+		suite.Require().Equal(ErrorOrganizationUnitNotFound, *err)
+	})
+
+	suite.Run("get by path error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, errors.New("boom")).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		_, err := service.UpdateOrganizationUnitByPath(context.Background(), "root", request)
+
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("success", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(existing, nil).
+			Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+			Return(false).
+			Twice() // Called in UpdateOrganizationUnitByPath and updateOUInternal
+		store.On("UpdateOrganizationUnit", mock.Anything, mock.AnythingOfType("providers.OrganizationUnit")).
+			Return(nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		result, err := service.UpdateOrganizationUnitByPath(context.Background(), "root", request)
+
+		suite.Require().Nil(err)
+		suite.Require().Equal("ou-1", result.ID)
+	})
+
+	suite.Run("declarative resource cannot be updated", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		existing := providers.OrganizationUnit{ID: "ou-1", Handle: "root", Name: "Root"}
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(existing, nil).
+			Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+			Return(true).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		_, err := service.UpdateOrganizationUnitByPath(context.Background(), "root", request)
+
+		suite.Require().Equal(ErrorCannotModifyDeclarativeResource, *err)
+		store.AssertNumberOfCalls(suite.T(), "UpdateOrganizationUnit", 0)
+	})
+}
+
+// blockingDeps builds a dependency response containing a single restrict usage.
+func blockingDeps() *resourcedependency.DependenciesResponse {
+	total := 1
+	return &resourcedependency.DependenciesResponse{
+		TotalResults: &total,
+		Count:        1,
+		Usages: []resourcedependency.ResourceDependency{{
+			ResourceType:     resourcedependency.ResourceTypeUser,
+			ID:               "user-1",
+			BehaviorOnDelete: resourcedependency.BehaviorRestrict,
+		}},
+	}
+}
+
+// emptyDeps builds a dependency response with no usages.
+func emptyDeps() *resourcedependency.DependenciesResponse {
+	total := 0
+	return &resourcedependency.DependenciesResponse{TotalResults: &total}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_DeleteOrganizationUnit() {
+	testCases := []struct {
+		name     string
+		setup    func(*organizationUnitStoreInterfaceMock)
+		registry resourcedependency.Registry
+		wantErr  *tidcommon.ServiceError
+	}{
+		{
+			name: "existence check error",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name: "not found",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, nil).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name: "has blocking dependencies",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).Once()
+			},
+			registry: &stubDependencyRegistry{resp: blockingDeps()},
+			wantErr:  &ErrorCannotDeleteOrganizationUnit,
+		},
+		{
+			name: "dependency data unavailable",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).Once()
+			},
+			registry: &stubDependencyRegistry{resp: &resourcedependency.DependenciesResponse{}},
+			wantErr:  &tidcommon.InternalServerError,
+		},
+		{
+			name: "delete failure",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).Once()
+				store.On("DeleteOrganizationUnit", mock.Anything, "ou-1").
+					Return(errors.New("boom")).Once()
+			},
+			registry: &stubDependencyRegistry{resp: emptyDeps()},
+			wantErr:  &tidcommon.InternalServerError,
+		},
+		{
+			name: "delete not found",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).Once()
+				store.On("DeleteOrganizationUnit", mock.Anything, "ou-1").
+					Return(ErrOrganizationUnitNotFound).Once()
+			},
+			registry: &stubDependencyRegistry{resp: emptyDeps()},
+			wantErr:  &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name: "success",
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+				store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+					Return(false).Once()
+				store.On("DeleteOrganizationUnit", mock.Anything, "ou-1").
+					Return(nil).Once()
+			},
+			registry: &stubDependencyRegistry{resp: emptyDeps()},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			tc.setup(store)
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			if tc.registry != nil {
+				service.SetDependencyRegistry(tc.registry)
+			}
+			err := service.DeleteOrganizationUnit(context.Background(), "ou-1")
+
+			if tc.wantErr != nil {
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetResourceDependencies() {
+	suite.Run("reports child organization units as restrict", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitChildrenList",
+			mock.Anything, "ou-1", serverconst.MaxCompositeStoreRecords, 0, mock.Anything).
+			Return([]providers.OrganizationUnitBasic{{ID: "child-1", Name: "Child 1"}}, nil).Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		deps, err := service.GetResourceDependencies(
+			context.Background(), resourcedependency.ResourceTypeOU, "ou-1")
+
+		suite.Require().NoError(err)
+		suite.Require().Len(deps, 1)
+		suite.Require().Equal(resourcedependency.ResourceTypeOU, deps[0].ResourceType)
+		suite.Require().Equal("child-1", deps[0].ID)
+		suite.Require().Equal(resourcedependency.BehaviorRestrict, deps[0].BehaviorOnDelete)
+	})
+
+	suite.Run("ignores non-organization-unit targets", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		deps, err := service.GetResourceDependencies(
+			context.Background(), resourcedependency.ResourceTypeUser, "user-1")
+
+		suite.Require().NoError(err)
+		suite.Require().Empty(deps)
+	})
+
+	suite.Run("store error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitChildrenList",
+			mock.Anything, "ou-1", serverconst.MaxCompositeStoreRecords, 0, mock.Anything).
+			Return([]providers.OrganizationUnitBasic(nil), errors.New("boom")).Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		deps, err := service.GetResourceDependencies(
+			context.Background(), resourcedependency.ResourceTypeOU, "ou-1")
+
+		suite.Require().Error(err)
+		suite.Require().Nil(deps)
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_DeleteOrganizationUnitByPath() {
+	suite.Run("invalid path", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		err := service.DeleteOrganizationUnitByPath(context.Background(), "  ")
+
+		suite.Require().Equal(ErrorInvalidHandlePath, *err)
+		store.AssertNumberOfCalls(suite.T(), "GetOrganizationUnitByPath", 0)
+	})
+
+	suite.Run("not found", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		err := service.DeleteOrganizationUnitByPath(context.Background(), "root")
+
+		suite.Require().Equal(ErrorOrganizationUnitNotFound, *err)
+	})
+
+	suite.Run("get by path error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, errors.New("boom")).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		err := service.DeleteOrganizationUnitByPath(context.Background(), "root")
+
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("cannot delete - has blocking dependencies", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+			Return(false).Twice()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		service.SetDependencyRegistry(&stubDependencyRegistry{resp: blockingDeps()})
+		err := service.DeleteOrganizationUnitByPath(context.Background(), "root")
+
+		suite.Require().Equal(ErrorCannotDeleteOrganizationUnit, *err)
+	})
+
+	suite.Run("success", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+			Return(false).Twice()
+		store.On("DeleteOrganizationUnit", mock.Anything, "ou-1").
+			Return(nil).Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		service.SetDependencyRegistry(&stubDependencyRegistry{resp: emptyDeps()})
+		err := service.DeleteOrganizationUnitByPath(context.Background(), "root")
+
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("declarative resource cannot be deleted", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").
+			Return(true).Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		err := service.DeleteOrganizationUnitByPath(context.Background(), "root")
+
+		suite.Require().Equal(ErrorCannotModifyDeclarativeResource, *err)
+		store.AssertNumberOfCalls(suite.T(), "GetOrganizationUnitChildrenCount", 0)
+		store.AssertNumberOfCalls(suite.T(), "DeleteOrganizationUnit", 0)
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitChildren() {
+	testCases := []struct {
+		name       string
+		limit      int
+		offset     int
+		filterExpr *tidcommon.FilterGroup
+		setup      func(*organizationUnitStoreInterfaceMock)
+		wantErr    *tidcommon.ServiceError
+		wantResult *ouListExpectations
+	}{
+		{
+			name:    "invalid pagination",
+			limit:   0,
+			offset:  0,
+			wantErr: &ErrorInvalidLimit,
+		},
+		{
+			name:  "invalid filter attribute",
+			limit: 5,
+			filterExpr: &tidcommon.FilterGroup{Clauses: []tidcommon.FilterClause{
+				{Expr: tidcommon.FilterExpression{Attribute: "id", Operator: tidcommon.OperatorEq, Value: "ou-1"}},
+			}},
+			wantErr: &ErrorInvalidFilter,
+		},
+		{
+			name:  "ou not found",
+			limit: 5,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, nil).
+					Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name:  "existence check error",
+			limit: 5,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "list failure",
+			limit: 5,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).
+					Once()
+				store.On("GetOrganizationUnitChildrenList", mock.Anything, "ou-1", 5, 0, mock.Anything).
+					Return(nil, errors.New("list fail")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "composite limit exceeded",
+			limit: 5,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).
+					Once()
+				store.On("GetOrganizationUnitChildrenList", mock.Anything, "ou-1", 5, 0, mock.Anything).
+					Return(nil, ErrResultLimitExceededInCompositeMode).
+					Once()
+			},
+			wantErr: &ErrorResultLimitExceeded,
+		},
+		{
+			name:  "count failure",
+			limit: 5,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).
+					Once()
+				store.On("GetOrganizationUnitChildrenList", mock.Anything, "ou-1", 5, 0, mock.Anything).
+					Return([]providers.OrganizationUnitBasic{}, nil).
+					Once()
+				store.On("GetOrganizationUnitChildrenCount", mock.Anything, "ou-1", mock.Anything).
+					Return(0, errors.New("count fail")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "success",
+			limit: 2,
+			setup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).
+					Once()
+				store.On("GetOrganizationUnitChildrenList", mock.Anything, "ou-1", 2, 0, mock.Anything).
+					Return([]providers.OrganizationUnitBasic{
+						{ID: "child-1", Handle: "finance", Name: "Finance"},
+					}, nil).
+					Once()
+				store.On("GetOrganizationUnitChildrenCount", mock.Anything, "ou-1", mock.Anything).
+					Return(1, nil).
+					Once()
+			},
+			wantResult: &ouListExpectations{
+				totalResults: 1,
+				count:        1,
+				startIndex:   1,
+				handles:      []string{"finance"},
+				linkRels:     []string{},
+				linkHrefs:    []string{},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.setup != nil {
+				tc.setup(store)
+			}
+
+			service := suite.newService(store, newAllowAllAuthz(suite.T()))
+			resp, err := service.GetOrganizationUnitChildren(
+				context.Background(), "ou-1", tc.limit, tc.offset, tc.filterExpr,
+			)
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.assertOUListResponse(resp, tc.wantResult)
+			}
+
+			if tc.wantErr == &ErrorInvalidLimit || tc.wantErr == &ErrorInvalidFilter {
+				store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_validateOUHandle() {
+	service := &organizationUnitService{}
+
+	suite.Run("blank handle", func() {
+		err := service.validateOUHandle("   ")
+		suite.Require().Equal(ErrorInvalidRequestFormat, *err)
+	})
+
+	suite.Run("handle with slash", func() {
+		err := service.validateOUHandle("root/child")
+		suite.Require().Equal(ErrorInvalidRequestFormat, *err)
+	})
+
+	suite.Run("valid handle", func() {
+		err := service.validateOUHandle("finance")
+		suite.Require().Nil(err)
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_validateDefaultFlows() {
+	suite.Run("no flow resolver configured skips validation", func() {
+		service := &organizationUnitService{}
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			AuthFlowID: "auth-flow-1",
+		})
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("empty flow IDs are not validated", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		service := &organizationUnitService{flowResolver: flowResolver}
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{})
+		suite.Require().Nil(err)
+		flowResolver.AssertNumberOfCalls(suite.T(), "IsValidFlow", 0)
+	})
+
+	suite.Run("all valid flows", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		flowResolver.On("IsValidFlow", mock.Anything, "auth-flow-1", providers.FlowTypeAuthentication).
+			Return(true, nil).Once()
+		flowResolver.On("IsValidFlow", mock.Anything, "reg-flow-1", providers.FlowTypeRegistration).
+			Return(true, nil).Once()
+		flowResolver.On("IsValidFlow", mock.Anything, "recovery-flow-1", providers.FlowTypeRecovery).
+			Return(true, nil).Once()
+		flowResolver.On("IsValidFlow", mock.Anything, "signout-flow-1", providers.FlowTypeSignOut).
+			Return(true, nil).Once()
+		service := &organizationUnitService{flowResolver: flowResolver}
+
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			AuthFlowID:         "auth-flow-1",
+			RegistrationFlowID: "reg-flow-1",
+			RecoveryFlowID:     "recovery-flow-1",
+			SignOutFlowID:      "signout-flow-1",
+		})
+
+		suite.Require().Nil(err)
+	})
+
+	suite.Run("invalid auth flow", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		flowResolver.On("IsValidFlow", mock.Anything, "bad-flow", providers.FlowTypeAuthentication).
+			Return(false, nil).Once()
+		service := &organizationUnitService{flowResolver: flowResolver}
+
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			AuthFlowID: "bad-flow",
+		})
+
+		suite.Require().Equal(ErrorInvalidAuthFlowID, *err)
+	})
+
+	suite.Run("invalid registration flow", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		flowResolver.On("IsValidFlow", mock.Anything, "bad-flow", providers.FlowTypeRegistration).
+			Return(false, nil).Once()
+		service := &organizationUnitService{flowResolver: flowResolver}
+
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			RegistrationFlowID: "bad-flow",
+		})
+
+		suite.Require().Equal(ErrorInvalidRegistrationFlowID, *err)
+	})
+
+	suite.Run("invalid recovery flow", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		flowResolver.On("IsValidFlow", mock.Anything, "bad-flow", providers.FlowTypeRecovery).
+			Return(false, nil).Once()
+		service := &organizationUnitService{flowResolver: flowResolver}
+
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			RecoveryFlowID: "bad-flow",
+		})
+
+		suite.Require().Equal(ErrorInvalidRecoveryFlowID, *err)
+	})
+
+	suite.Run("invalid signout flow", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		flowResolver.On("IsValidFlow", mock.Anything, "bad-flow", providers.FlowTypeSignOut).
+			Return(false, nil).Once()
+		service := &organizationUnitService{flowResolver: flowResolver}
+
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			SignOutFlowID: "bad-flow",
+		})
+
+		suite.Require().Equal(ErrorInvalidSignOutFlowID, *err)
+	})
+
+	suite.Run("flow resolver server error propagates", func() {
+		flowResolver := newOuFlowResolverMock(suite.T())
+		flowResolver.On("IsValidFlow", mock.Anything, "auth-flow-1", providers.FlowTypeAuthentication).
+			Return(false, &tidcommon.InternalServerError).Once()
+		service := &organizationUnitService{flowResolver: flowResolver}
+
+		err := service.validateDefaultFlows(context.Background(), providers.OrganizationUnitRequestWithID{
+			AuthFlowID: "auth-flow-1",
+		})
+
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitChildrenByPath() {
+	config := newDefaultPathListConfig[*providers.OrganizationUnitListResponse](
+		" ",
+		5,
+		0,
+		"GetOrganizationUnitChildrenList",
+		[]providers.OrganizationUnitBasic{},
+		"GetOrganizationUnitChildrenCount",
+		0,
+		func(resp *providers.OrganizationUnitListResponse) {
+			suite.Require().NotNil(resp)
+		},
+		invokeChildrenByPath,
+		mock.Anything, // filter arg
+	)
+	runOUPathListTests(suite, config)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsers() {
+	testCases := []struct {
+		name          string
+		limit         int
+		offset        int
+		storeSetup    func(*organizationUnitStoreInterfaceMock)
+		resolverSetup func(*OUUserResolverMock)
+		nilResolver   bool
+		wantErr       *tidcommon.ServiceError
+	}{
+		{
+			name:    "invalid pagination",
+			limit:   0,
+			offset:  0,
+			wantErr: &ErrorInvalidLimit,
+		},
+		{
+			name:        "nil user resolver",
+			limit:       5,
+			nilResolver: true,
+			wantErr:     &tidcommon.InternalServerError,
+		},
+		{
+			name:  "not found",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, nil).Once()
+			},
+			wantErr: &ErrorOrganizationUnitNotFound,
+		},
+		{
+			name:  "existence error",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(false, errors.New("boom")).Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "list error",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(ur *OUUserResolverMock) {
+				ur.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, false).
+					Return([]User(nil), errors.New("list")).Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "count error",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(ur *OUUserResolverMock) {
+				ur.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, false).
+					Return([]User{{ID: "user-1"}}, nil).Once()
+				ur.On("GetUserCountByOUID", mock.Anything, "ou-1").
+					Return(0, errors.New("count")).Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "success",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(ur *OUUserResolverMock) {
+				ur.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, false).
+					Return([]User{{ID: "user-1"}, {ID: "user-2"}}, nil).Once()
+				ur.On("GetUserCountByOUID", mock.Anything, "ou-1").
+					Return(2, nil).Once()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.storeSetup != nil {
+				tc.storeSetup(store)
+			}
+
+			var userRes OUUserResolver
+			if !tc.nilResolver {
+				mock := new(OUUserResolverMock)
+				if tc.resolverSetup != nil {
+					tc.resolverSetup(mock)
+				}
+				userRes = mock
+			}
+
+			service := suite.newServiceWithResolvers(
+				store, newAllowAllAuthz(suite.T()), userRes, nil,
+			)
+			resp, err := service.GetOrganizationUnitUsers(context.Background(), "ou-1", tc.limit, tc.offset, false)
+
+			if tc.wantErr != nil {
+				suite.Require().Nil(resp)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().Equal(2, resp.TotalResults)
+				suite.Require().Len(resp.Users, 2)
+			}
+
+			if tc.wantErr == &ErrorInvalidLimit {
+				store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsers_WithDisplay() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+		Return(true, nil).Once()
+
+	userRes := NewOUUserResolverMock(suite.T())
+	userRes.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, true).
+		Return([]User{
+			{ID: "user-1", Type: "employee", Display: "alice@example.com"},
+			{ID: "user-2", Type: "contractor", Display: "Bob Smith"},
+		}, nil).Once()
+	userRes.On("GetUserCountByOUID", mock.Anything, "ou-1").
+		Return(2, nil).Once()
+
+	service := suite.newServiceWithResolvers(
+		store, newAllowAllAuthz(suite.T()), userRes, nil,
+	)
+
+	resp, err := service.GetOrganizationUnitUsers(context.Background(), "ou-1", 5, 0, true)
+	suite.Require().Nil(err)
+	suite.Require().Len(resp.Users, 2)
+	suite.Equal("employee", resp.Users[0].Type)
+	suite.Equal("alice@example.com", resp.Users[0].Display)
+	suite.Equal("contractor", resp.Users[1].Type)
+	suite.Equal("Bob Smith", resp.Users[1].Display)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsers_WithDisplay_FallbackToID() {
+	// When the resolver cannot resolve a display attribute (schema error or attribute mismatch),
+	// it falls back to the user ID. The OU service simply passes through whatever the resolver returns.
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+		Return(true, nil).Once()
+
+	userRes := NewOUUserResolverMock(suite.T())
+	userRes.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, true).
+		Return([]User{
+			{ID: "user-1", Type: "employee", Display: "user-1"},
+		}, nil).Once()
+	userRes.On("GetUserCountByOUID", mock.Anything, "ou-1").
+		Return(1, nil).Once()
+
+	service := suite.newServiceWithResolvers(
+		store, newAllowAllAuthz(suite.T()), userRes, nil,
+	)
+
+	resp, err := service.GetOrganizationUnitUsers(context.Background(), "ou-1", 5, 0, true)
+	suite.Require().Nil(err)
+	suite.Require().Len(resp.Users, 1)
+	suite.Equal("user-1", resp.Users[0].Display)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsers_AccessDenied() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, nil).Once()
+
+	userRes := NewOUUserResolverMock(suite.T())
+	service := suite.newServiceWithResolvers(store, authzMock, userRes, nil)
+
+	resp, err := service.GetOrganizationUnitUsers(context.Background(), "ou-1", 5, 0, false)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Code, err.Code)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Type, err.Type)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Error.DefaultValue, err.Error.DefaultValue)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.ErrorDescription.DefaultValue,
+		err.ErrorDescription.DefaultValue)
+
+	// Verify no store or resolver calls were made
+	store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitGroups_AccessDenied() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, nil).Once()
+
+	groupRes := new(OUGroupResolverMock)
+	service := suite.newServiceWithResolvers(store, authzMock, nil, groupRes)
+
+	resp, err := service.GetOrganizationUnitGroups(context.Background(), "ou-1", 5, 0)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Code, err.Code)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Type, err.Type)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Error.DefaultValue, err.Error.DefaultValue)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.ErrorDescription.DefaultValue,
+		err.ErrorDescription.DefaultValue)
+
+	store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsers_AuthzError() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, &tidcommon.ServiceError{
+			Code:  "500",
+			Error: tidcommon.I18nMessage{DefaultValue: "authz service unavailable"},
+		}).Once()
+
+	userRes := NewOUUserResolverMock(suite.T())
+	service := suite.newServiceWithResolvers(store, authzMock, userRes, nil)
+
+	resp, err := service.GetOrganizationUnitUsers(context.Background(), "ou-1", 5, 0, false)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.InternalServerError, *err)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitChildren_AccessDenied() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, nil).Once()
+
+	service := suite.newService(store, authzMock)
+
+	resp, err := service.GetOrganizationUnitChildren(context.Background(), "ou-1", 5, 0, nil)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Code, err.Code)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Type, err.Type)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Error.DefaultValue, err.Error.DefaultValue)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.ErrorDescription.DefaultValue,
+		err.ErrorDescription.DefaultValue)
+
+	store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitChildren_AuthzError() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, &tidcommon.ServiceError{
+			Code:  "500",
+			Error: tidcommon.I18nMessage{DefaultValue: "authz service unavailable"},
+		}).Once()
+
+	service := suite.newService(store, authzMock)
+
+	resp, err := service.GetOrganizationUnitChildren(context.Background(), "ou-1", 5, 0, nil)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.InternalServerError, *err)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitGroups_AuthzError() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, &tidcommon.ServiceError{
+			Code:  "500",
+			Error: tidcommon.I18nMessage{DefaultValue: "authz service unavailable"},
+		}).Once()
+
+	groupRes := new(OUGroupResolverMock)
+	service := suite.newServiceWithResolvers(store, authzMock, nil, groupRes)
+
+	resp, err := service.GetOrganizationUnitGroups(context.Background(), "ou-1", 5, 0)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.InternalServerError, *err)
+}
+
+// runResolverPathListTests runs common path-based list tests for user/group resolver-backed endpoints.
+func (suite *OrganizationUnitServiceTestSuite) runResolverPathListTests(
+	invalidPath string,
+	makeResolvers func() (OUUserResolver, OUGroupResolver),
+	errorResolvers func() (OUUserResolver, OUGroupResolver),
+	setupResolvers func() (OUUserResolver, OUGroupResolver),
+	invoke func(*organizationUnitService, string, int, int) (interface{}, *tidcommon.ServiceError),
+) {
+	suite.Run("invalid path", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		resp, err := invoke(service, invalidPath, 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(ErrorInvalidHandlePath, *err)
+	})
+
+	suite.Run("nil resolver", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newServiceWithResolvers(store, newAllowAllAuthz(suite.T()), nil, nil)
+
+		resp, err := invoke(service, "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("not found", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).Once()
+
+		userRes, groupRes := makeResolvers()
+		service := suite.newServiceWithResolvers(store, newAllowAllAuthz(suite.T()), userRes, groupRes)
+		resp, err := invoke(service, "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(ErrorOrganizationUnitNotFound, *err)
+	})
+
+	suite.Run("store error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, errors.New("db connection failed")).Once()
+
+		userRes, groupRes := makeResolvers()
+		service := suite.newServiceWithResolvers(store, newAllowAllAuthz(suite.T()), userRes, groupRes)
+		resp, err := invoke(service, "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("resolver error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+		store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+			Return(true, nil).Once()
+
+		userRes, groupRes := errorResolvers()
+		service := suite.newServiceWithResolvers(store, newAllowAllAuthz(suite.T()), userRes, groupRes)
+		resp, err := invoke(service, "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("success", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+		store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+			Return(true, nil).Once()
+
+		userRes, groupRes := setupResolvers()
+		service := suite.newServiceWithResolvers(
+			store, newAllowAllAuthz(suite.T()), userRes, groupRes,
+		)
+		resp, err := invoke(service, "root", 5, 0)
+		suite.Require().Nil(err)
+		suite.Require().NotNil(resp)
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsersByPath() {
+	suite.runResolverPathListTests("   ",
+		func() (OUUserResolver, OUGroupResolver) {
+			return NewOUUserResolverMock(suite.T()), nil
+		},
+		func() (OUUserResolver, OUGroupResolver) {
+			userRes := NewOUUserResolverMock(suite.T())
+			userRes.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, false).
+				Return(nil, errors.New("resolver unavailable")).Once()
+			return userRes, nil
+		},
+		func() (OUUserResolver, OUGroupResolver) {
+			userRes := new(OUUserResolverMock)
+			userRes.On("GetUserListByOUID", mock.Anything, "ou-1", 5, 0, false).
+				Return([]User{}, nil).Once()
+			userRes.On("GetUserCountByOUID", mock.Anything, "ou-1").
+				Return(0, nil).Once()
+			return userRes, nil
+		},
+		func(svc *organizationUnitService, path string, limit,
+			offset int) (interface{}, *tidcommon.ServiceError) {
+			return svc.GetOrganizationUnitUsersByPath(context.Background(), path, limit, offset, false)
+		},
+	)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsersByPath_WithDisplay() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("GetOrganizationUnitByPath", mock.Anything, []string{"engineering"}).
+		Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+	store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+		Return(true, nil).Once()
+
+	userRes := NewOUUserResolverMock(suite.T())
+	userRes.On("GetUserListByOUID", mock.Anything, "ou-1", 2, 0, true).
+		Return([]User{
+			{ID: "user-1", Type: "employee", Display: "alice@example.com"},
+			{ID: "user-2", Type: "employee", Display: "bob@example.com"},
+		}, nil).Once()
+	userRes.On("GetUserCountByOUID", mock.Anything, "ou-1").
+		Return(4, nil).Once()
+
+	service := suite.newServiceWithResolvers(
+		store, newAllowAllAuthz(suite.T()), userRes, nil,
+	)
+
+	resp, err := service.GetOrganizationUnitUsersByPath(
+		context.Background(), "engineering", 2, 0, true,
+	)
+	suite.Require().Nil(err)
+	suite.Require().Len(resp.Users, 2)
+	suite.Equal("employee", resp.Users[0].Type)
+	suite.Equal("alice@example.com", resp.Users[0].Display)
+	suite.Equal("employee", resp.Users[1].Type)
+	suite.Equal("bob@example.com", resp.Users[1].Display)
+
+	// Verify pagination links preserve the include=display query parameter and use the tree path
+	suite.Require().NotEmpty(resp.Links)
+	for _, link := range resp.Links {
+		suite.Contains(link.Href, "include=display",
+			"pagination link %q should preserve include=display", link.Rel)
+		suite.Contains(link.Href, "/organization-units/tree/engineering/users",
+			"pagination link %q href must use tree path, got %q", link.Rel, link.Href)
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitUsersByPath_AccessDenied() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+		Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, nil).Once()
+
+	userRes := NewOUUserResolverMock(suite.T())
+	service := suite.newServiceWithResolvers(store, authzMock, userRes, nil)
+
+	resp, err := service.GetOrganizationUnitUsersByPath(context.Background(), "root", 5, 0, false)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Code, err.Code)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitGroups() {
+	testCases := []struct {
+		name          string
+		limit         int
+		offset        int
+		storeSetup    func(*organizationUnitStoreInterfaceMock)
+		resolverSetup func(*OUGroupResolverMock)
+		nilResolver   bool
+		wantErr       *tidcommon.ServiceError
+		assert        func(*GroupListResponse)
+	}{
+		{
+			name:    "invalid pagination",
+			limit:   0,
+			wantErr: &ErrorInvalidLimit,
+		},
+		{
+			name:        "nil group resolver",
+			limit:       5,
+			nilResolver: true,
+			wantErr:     &tidcommon.InternalServerError,
+		},
+		{
+			name:  "list error",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(gr *OUGroupResolverMock) {
+				gr.On("GetGroupListByOUID", mock.Anything, "ou-1", 5, 0).
+					Return([]Group(nil), errors.New("boom")).Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "success",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(gr *OUGroupResolverMock) {
+				gr.On("GetGroupListByOUID", mock.Anything, "ou-1", 5, 0).
+					Return([]Group{{ID: "g1"}}, nil).Once()
+				gr.On("GetGroupCountByOUID", mock.Anything, "ou-1").
+					Return(1, nil).Once()
+			},
+			assert: func(resp *GroupListResponse) {
+				suite.Require().Equal(1, resp.TotalResults)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.storeSetup != nil {
+				tc.storeSetup(store)
+			}
+
+			var groupRes OUGroupResolver
+			if !tc.nilResolver {
+				mock := new(OUGroupResolverMock)
+				if tc.resolverSetup != nil {
+					tc.resolverSetup(mock)
+				}
+				groupRes = mock
+			}
+
+			service := suite.newServiceWithResolvers(
+				store, newAllowAllAuthz(suite.T()), nil, groupRes,
+			)
+			resp, err := service.GetOrganizationUnitGroups(context.Background(), "ou-1", tc.limit, tc.offset)
+
+			if tc.wantErr != nil {
+				suite.Require().Nil(resp)
+				suite.Require().Equal(*tc.wantErr, *err)
+				if tc.wantErr == &ErrorInvalidLimit {
+					store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+				}
+				return
+			}
+
+			suite.Require().Nil(err)
+			if tc.assert != nil {
+				tc.assert(resp)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_BuildUserListResponse() {
+	users := []User{{ID: "u1"}, {ID: "u2"}}
+	resp, err := buildUserListResponse("/organization-units", users, 10, 5, 0, false)
+	suite.Nil(err)
+	suite.NotNil(resp)
+	suite.Equal(10, resp.TotalResults)
+	suite.Equal(2, resp.Count)
+	suite.Equal(1, resp.StartIndex)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_BuildGroupListResponse_InvalidType() {
+	resp, err := buildGroupListResponse("/organization-units", 123, 10, 5, 0)
+	suite.Nil(resp)
+	suite.NotNil(err)
+	suite.Equal(tidcommon.InternalServerError, *err)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_BuildOrganizationUnitListResponse_InvalidType() {
+	resp, err := buildOrganizationUnitListResponse("/organization-units", struct{}{}, 10, 5, 0)
+	suite.Nil(resp)
+	suite.NotNil(err)
+	suite.Equal(tidcommon.InternalServerError, *err)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitGroupsByPath() {
+	suite.runResolverPathListTests("  ",
+		func() (OUUserResolver, OUGroupResolver) {
+			return nil, NewOUGroupResolverMock(suite.T())
+		},
+		func() (OUUserResolver, OUGroupResolver) {
+			groupRes := NewOUGroupResolverMock(suite.T())
+			groupRes.On("GetGroupListByOUID", mock.Anything, "ou-1", 5, 0).
+				Return(nil, errors.New("resolver unavailable")).Once()
+			return nil, groupRes
+		},
+		func() (OUUserResolver, OUGroupResolver) {
+			groupRes := new(OUGroupResolverMock)
+			groupRes.On("GetGroupListByOUID", mock.Anything, "ou-1", 5, 0).
+				Return([]Group{}, nil).Once()
+			groupRes.On("GetGroupCountByOUID", mock.Anything, "ou-1").
+				Return(0, nil).Once()
+			return nil, groupRes
+		},
+		func(svc *organizationUnitService, path string, limit,
+			offset int) (interface{}, *tidcommon.ServiceError) {
+			return svc.GetOrganizationUnitGroupsByPath(context.Background(), path, limit, offset)
+		},
+	)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitGroupsByPath_LinksUseTreePath() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("GetOrganizationUnitByPath", mock.Anything, []string{"finance"}).
+		Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+	store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+		Return(true, nil).Once()
+
+	groupRes := NewOUGroupResolverMock(suite.T())
+	groupRes.On("GetGroupListByOUID", mock.Anything, "ou-1", 2, 2).
+		Return([]Group{{ID: "g1"}, {ID: "g2"}}, nil).Once()
+	groupRes.On("GetGroupCountByOUID", mock.Anything, "ou-1").
+		Return(5, nil).Once()
+
+	service := suite.newServiceWithResolvers(store, newAllowAllAuthz(suite.T()), nil, groupRes)
+	resp, err := service.GetOrganizationUnitGroupsByPath(context.Background(), "finance", 2, 2)
+	suite.Require().Nil(err)
+	suite.Require().NotNil(resp)
+	suite.Require().Equal(5, resp.TotalResults)
+	suite.Require().Len(resp.Links, 4)
+	for _, link := range resp.Links {
+		suite.Contains(link.Href, "/organization-units/tree/finance/groups",
+			"link %q href must use tree path, got %q", link.Rel, link.Href)
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitGroupsByPath_AccessDenied() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+		Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+
+	authzMock := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+	authzMock.On("IsActionAllowed", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, nil).Once()
+
+	groupRes := NewOUGroupResolverMock(suite.T())
+	service := suite.newServiceWithResolvers(store, authzMock, nil, groupRes)
+
+	resp, err := service.GetOrganizationUnitGroupsByPath(context.Background(), "root", 5, 0)
+	suite.Require().Nil(resp)
+	suite.Require().Equal(tidcommon.ErrorUnauthorized.Code, err.Code)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitRoles() {
+	testCases := []struct {
+		name          string
+		limit         int
+		offset        int
+		storeSetup    func(*organizationUnitStoreInterfaceMock)
+		resolverSetup func(*OURoleResolverMock)
+		nilResolver   bool
+		wantErr       *tidcommon.ServiceError
+		assert        func(*RoleListResponse)
+	}{
+		{
+			name:    "invalid pagination",
+			limit:   0,
+			wantErr: &ErrorInvalidLimit,
+		},
+		{
+			name:        "nil role resolver",
+			limit:       5,
+			nilResolver: true,
+			wantErr:     &tidcommon.InternalServerError,
+		},
+		{
+			name:  "list error",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(rr *OURoleResolverMock) {
+				rr.On("GetRoleListByOUID", mock.Anything, "ou-1", 5, 0).
+					Return([]Role(nil), errors.New("boom")).Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:  "success",
+			limit: 5,
+			storeSetup: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+					Return(true, nil).Once()
+			},
+			resolverSetup: func(rr *OURoleResolverMock) {
+				rr.On("GetRoleListByOUID", mock.Anything, "ou-1", 5, 0).
+					Return([]Role{{ID: "r1", Name: "Admin"}}, nil).Once()
+				rr.On("GetRoleCountByOUID", mock.Anything, "ou-1").
+					Return(1, nil).Once()
+			},
+			assert: func(resp *RoleListResponse) {
+				suite.Require().Equal(1, resp.TotalResults)
+				suite.Require().Equal("Admin", resp.Roles[0].Name)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.storeSetup != nil {
+				tc.storeSetup(store)
+			}
+
+			var roleRes OURoleResolver
+			if !tc.nilResolver {
+				mock := new(OURoleResolverMock)
+				if tc.resolverSetup != nil {
+					tc.resolverSetup(mock)
+				}
+				roleRes = mock
+			}
+
+			service := suite.newServiceWithRoleResolver(store, newAllowAllAuthz(suite.T()), roleRes)
+			resp, err := service.GetOrganizationUnitRoles(context.Background(), "ou-1", tc.limit, tc.offset)
+
+			if tc.wantErr != nil {
+				suite.Require().Nil(resp)
+				suite.Require().Equal(*tc.wantErr, *err)
+				if tc.wantErr == &ErrorInvalidLimit {
+					store.AssertNumberOfCalls(suite.T(), "IsOrganizationUnitExists", 0)
+				}
+				return
+			}
+
+			suite.Require().Nil(err)
+			if tc.assert != nil {
+				tc.assert(resp)
+			}
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitRolesByPath() {
+	suite.Run("invalid path", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+
+		resp, err := service.GetOrganizationUnitRolesByPath(context.Background(), "   ", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(ErrorInvalidHandlePath, *err)
+	})
+
+	suite.Run("nil role resolver", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		service := suite.newServiceWithRoleResolver(store, newAllowAllAuthz(suite.T()), nil)
+
+		resp, err := service.GetOrganizationUnitRolesByPath(context.Background(), "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("not found", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).Once()
+
+		roleRes := new(OURoleResolverMock)
+		service := suite.newServiceWithRoleResolver(store, newAllowAllAuthz(suite.T()), roleRes)
+		resp, err := service.GetOrganizationUnitRolesByPath(context.Background(), "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(ErrorOrganizationUnitNotFound, *err)
+	})
+
+	suite.Run("store error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"root"}).
+			Return(providers.OrganizationUnit{}, errors.New("db connection failed")).Once()
+
+		roleRes := new(OURoleResolverMock)
+		service := suite.newServiceWithRoleResolver(store, newAllowAllAuthz(suite.T()), roleRes)
+		resp, err := service.GetOrganizationUnitRolesByPath(context.Background(), "root", 5, 0)
+		suite.Require().Nil(resp)
+		suite.Require().Equal(tidcommon.InternalServerError, *err)
+	})
+
+	suite.Run("success links use tree path", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitByPath", mock.Anything, []string{"plain-llamas-lead"}).
+			Return(providers.OrganizationUnit{ID: "ou-1"}, nil).Once()
+		store.On("IsOrganizationUnitExists", mock.Anything, "ou-1").
+			Return(true, nil).Once()
+
+		roleRes := new(OURoleResolverMock)
+		roleRes.On("GetRoleListByOUID", mock.Anything, "ou-1", 2, 2).
+			Return([]Role{{ID: "r1", Name: "Admin"}, {ID: "r2", Name: "Editor"}}, nil).Once()
+		roleRes.On("GetRoleCountByOUID", mock.Anything, "ou-1").
+			Return(5, nil).Once()
+
+		service := suite.newServiceWithRoleResolver(store, newAllowAllAuthz(suite.T()), roleRes)
+		resp, err := service.GetOrganizationUnitRolesByPath(context.Background(), "plain-llamas-lead", 2, 2)
+		suite.Require().Nil(err)
+		suite.Require().NotNil(resp)
+		suite.Require().Equal(5, resp.TotalResults)
+		suite.Require().Len(resp.Links, 4)
+		for _, link := range resp.Links {
+			suite.Require().Contains(link.Href, "/organization-units/tree/plain-llamas-lead/roles",
+				"link %q href must use tree path, got %q", link.Rel, link.Href)
+		}
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_BuildRoleListResponse_InvalidType() {
+	resp, err := buildRoleListResponse("/organization-units", 123, 10, 5, 0)
+	suite.Nil(resp)
+	suite.NotNil(err)
+	suite.Equal(tidcommon.InternalServerError, *err)
+}
+
+func TestOUService_ValidateAndProcessHandlePath(t *testing.T) {
+	t.Run("invalid path", func(t *testing.T) {
+		handles, err := validateAndProcessHandlePath("   ")
+
+		require.Nil(t, handles)
+		require.Equal(t, &ErrorInvalidHandlePath, err)
+	})
+
+	t.Run("only slashes", func(t *testing.T) {
+		handles, err := validateAndProcessHandlePath("///")
+
+		require.Nil(t, handles)
+		require.Equal(t, &ErrorInvalidHandlePath, err)
+	})
+
+	t.Run("success", func(t *testing.T) {
+		handles, err := validateAndProcessHandlePath(" /root/ child / ")
+
+		require.Nil(t, err)
+		require.Equal(t, []string{"root", "child"}, handles)
+	})
+
+	t.Run("ignores empty segments", func(t *testing.T) {
+		handles, err := validateAndProcessHandlePath("root//child")
+
+		require.Nil(t, err)
+		require.Equal(t, []string{"root", "child"}, handles)
+	})
+}
+
+func TestOUService_ValidatePaginationParams(t *testing.T) {
+	require.Equal(t, &ErrorInvalidLimit, validatePaginationParams(0, 0))
+	require.Equal(t, &ErrorInvalidLimit, validatePaginationParams(serverconst.MaxPageSize+1, 0))
+	require.Equal(t, &ErrorInvalidOffset, validatePaginationParams(10, -1))
+	require.Nil(t, validatePaginationParams(10, 0))
+}
+
+func TestOUService_BuildPaginationLinks(t *testing.T) {
+	links := utils.BuildPaginationLinks("/organization-units", 5, 5, 20, "")
+	require.Len(t, links, 4)
+	require.Equal(t, "first", links[0].Rel)
+	require.Equal(t, "/organization-units?offset=0&limit=5", links[0].Href)
+
+	require.Equal(t, "prev", links[1].Rel)
+	require.Equal(t, "/organization-units?offset=0&limit=5", links[1].Href)
+
+	require.Equal(t, "next", links[2].Rel)
+	require.Equal(t, "/organization-units?offset=10&limit=5", links[2].Href)
+
+	require.Equal(t, "last", links[3].Rel)
+	require.Equal(t, "/organization-units?offset=15&limit=5", links[3].Href)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_CheckCircularDependency() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	service := suite.newService(store, newAllowAllAuthz(suite.T()))
+	parentID := testParentID
+
+	store.On("GetOrganizationUnit", mock.Anything, parentID).
+		Return(providers.OrganizationUnit{ID: parentID, Parent: &testGrandID}, nil).
+		Once()
+	store.On("GetOrganizationUnit", mock.Anything, "grand").
+		Return(providers.OrganizationUnit{ID: "grand", Parent: &testOUID}, nil).
+		Once()
+
+	err := service.checkCircularDependency(context.Background(), "ou-1", &parentID)
+
+	suite.Require().Equal(&ErrorCircularDependency, err)
+
+	store2 := newOrganizationUnitStoreInterfaceMock(suite.T())
+	service2 := suite.newService(store2, newAllowAllAuthz(suite.T()))
+	store2.On("GetOrganizationUnit", mock.Anything, parentID).
+		Return(providers.OrganizationUnit{}, ErrOrganizationUnitNotFound).
+		Once()
+
+	err = service2.checkCircularDependency(context.Background(), "ou-1", &parentID)
+	suite.Require().Nil(err)
+
+	store3 := newOrganizationUnitStoreInterfaceMock(suite.T())
+	service3 := suite.newService(store3, newAllowAllAuthz(suite.T()))
+	store3.On("GetOrganizationUnit", mock.Anything, parentID).
+		Return(providers.OrganizationUnit{}, errors.New("boom")).
+		Once()
+
+	err = service3.checkCircularDependency(context.Background(), "ou-1", &parentID)
+	suite.Require().Equal(&tidcommon.InternalServerError, err)
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_UpdateOrganizationUnit_SameParent() {
+	parentID := testParentOUID
+
+	suite.Run("skips conflict checks when name handle and parent unchanged", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		existing := providers.OrganizationUnit{
+			ID:          testOUID,
+			Handle:      "finance",
+			Name:        "Finance",
+			Description: "old",
+			Parent:      &parentID,
+		}
+		store.On("GetOrganizationUnit", mock.Anything, testOUID).
+			Return(existing, nil).
+			Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, testOUID).
+			Return(false).
+			Once()
+		store.On("IsOrganizationUnitExists", mock.Anything, parentID).
+			Return(true, nil).
+			Once()
+		// checkCircularDependency walks up from parent
+		store.On("GetOrganizationUnit", mock.Anything, parentID).
+			Return(providers.OrganizationUnit{ID: parentID, Parent: nil}, nil).
+			Once()
+		store.On("UpdateOrganizationUnit", mock.Anything, mock.MatchedBy(func(ou providers.OrganizationUnit) bool {
+			return ou.ID == testOUID && ou.Description == "updated" && *ou.Parent == parentID
+		})).
+			Return(nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		result, err := service.UpdateOrganizationUnit(
+			context.Background(),
+			testOUID,
+			providers.OrganizationUnitRequestWithID{
+				Handle:      "finance",
+				Name:        "Finance",
+				Description: "updated",
+				Parent:      &parentID,
+			},
+		)
+
+		suite.Require().Nil(err)
+		suite.Require().Equal("updated", result.Description)
+		store.AssertNumberOfCalls(suite.T(), "CheckOrganizationUnitNameConflict", 0)
+		store.AssertNumberOfCalls(suite.T(), "CheckOrganizationUnitHandleConflict", 0)
+		store.AssertExpectations(suite.T())
+	})
+
+	suite.Run("runs conflict checks when parent changes from nil to value", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		existing := providers.OrganizationUnit{
+			ID:     testOUID,
+			Handle: "finance",
+			Name:   "Finance",
+			Parent: nil,
+		}
+		store.On("GetOrganizationUnit", mock.Anything, testOUID).
+			Return(existing, nil).
+			Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, testOUID).
+			Return(false).
+			Once()
+		store.On("IsOrganizationUnitExists", mock.Anything, parentID).
+			Return(true, nil).
+			Once()
+		// checkCircularDependency walks up from parent
+		store.On("GetOrganizationUnit", mock.Anything, parentID).
+			Return(providers.OrganizationUnit{ID: parentID, Parent: nil}, nil).
+			Once()
+		store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", mock.MatchedBy(func(p *string) bool {
+			return p != nil && *p == parentID
+		})).
+			Return(false, nil).
+			Once()
+		store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", mock.MatchedBy(func(p *string) bool {
+			return p != nil && *p == parentID
+		})).
+			Return(false, nil).
+			Once()
+		store.On("UpdateOrganizationUnit", mock.Anything, mock.MatchedBy(func(ou providers.OrganizationUnit) bool {
+			return ou.ID == testOUID && *ou.Parent == parentID
+		})).
+			Return(nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		result, err := service.UpdateOrganizationUnit(
+			context.Background(),
+			testOUID,
+			providers.OrganizationUnitRequestWithID{
+				Handle: "finance",
+				Name:   "Finance",
+				Parent: &parentID,
+			},
+		)
+
+		suite.Require().Nil(err)
+		suite.Require().Equal(testOUID, result.ID)
+		store.AssertExpectations(suite.T())
+	})
+
+	suite.Run("runs conflict checks when parent changes from value to nil", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		existing := providers.OrganizationUnit{
+			ID:     testOUID,
+			Handle: "finance",
+			Name:   "Finance",
+			Parent: &parentID,
+		}
+		store.On("GetOrganizationUnit", mock.Anything, testOUID).
+			Return(existing, nil).
+			Once()
+		store.On("IsOrganizationUnitDeclarative", mock.Anything, testOUID).
+			Return(false).
+			Once()
+		store.On("CheckOrganizationUnitNameConflict", mock.Anything, "Finance", (*string)(nil)).
+			Return(false, nil).
+			Once()
+		store.On("CheckOrganizationUnitHandleConflict", mock.Anything, "finance", (*string)(nil)).
+			Return(false, nil).
+			Once()
+		store.On("UpdateOrganizationUnit", mock.Anything, mock.MatchedBy(func(ou providers.OrganizationUnit) bool {
+			return ou.ID == testOUID && ou.Parent == nil
+		})).
+			Return(nil).
+			Once()
+
+		service := suite.newService(store, newAllowAllAuthz(suite.T()))
+		result, err := service.UpdateOrganizationUnit(
+			context.Background(),
+			testOUID,
+			providers.OrganizationUnitRequestWithID{
+				Handle: "finance",
+				Name:   "Finance",
+				Parent: nil,
+			},
+		)
+
+		suite.Require().Nil(err)
+		suite.Require().Equal(testOUID, result.ID)
+		store.AssertExpectations(suite.T())
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_StringPtrEqual() {
+	suite.Run("both nil", func() {
+		suite.Require().True(stringPtrEqual(nil, nil))
+	})
+
+	suite.Run("first nil", func() {
+		b := "value"
+		suite.Require().False(stringPtrEqual(nil, &b))
+	})
+
+	suite.Run("second nil", func() {
+		a := "value"
+		suite.Require().False(stringPtrEqual(&a, nil))
+	})
+
+	suite.Run("equal values", func() {
+		a := "same"
+		b := "same"
+		suite.Require().True(stringPtrEqual(&a, &b))
+	})
+
+	suite.Run("different values", func() {
+		a := "one"
+		b := "two"
+		suite.Require().False(stringPtrEqual(&a, &b))
+	})
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitList_Authz() {
+	testCases := []struct {
+		name       string
+		limit      int
+		offset     int
+		setupStore func(*organizationUnitStoreInterfaceMock)
+		setupAuthz func(*sysauthzmock.SystemAuthorizationServiceInterfaceMock)
+		wantErr    *tidcommon.ServiceError
+		wantTotal  int
+	}{
+		{
+			name:   "authz error",
+			limit:  10,
+			offset: 0,
+			setupAuthz: func(authz *sysauthzmock.SystemAuthorizationServiceInterfaceMock) {
+				authz.On("GetAccessibleResources", mock.Anything, mock.Anything, mock.Anything).
+					Return((*sysauthz.AccessibleResources)(nil), &tidcommon.InternalServerError).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:   "filtered empty",
+			limit:  10,
+			offset: 0,
+			setupAuthz: func(authz *sysauthzmock.SystemAuthorizationServiceInterfaceMock) {
+				authz.On("GetAccessibleResources", mock.Anything, mock.Anything, mock.Anything).
+					Return(&sysauthz.AccessibleResources{AllAllowed: false, IDs: []string{}}, nil).
+					Once()
+			},
+			wantTotal: 0,
+		},
+		{
+			name:   "filtered with ids",
+			limit:  10,
+			offset: 0,
+			setupAuthz: func(authz *sysauthzmock.SystemAuthorizationServiceInterfaceMock) {
+				authz.On("GetAccessibleResources", mock.Anything, mock.Anything, mock.Anything).
+					Return(&sysauthz.AccessibleResources{AllAllowed: false, IDs: []string{"ou-1"}}, nil).
+					Once()
+			},
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1"}).
+					Return([]providers.OrganizationUnitBasic{{ID: "ou-1"}}, nil).
+					Once()
+			},
+			wantTotal: 1,
+		},
+		{
+			name:   "list all out of bounds",
+			limit:  10,
+			offset: 0,
+			setupAuthz: func(authz *sysauthzmock.SystemAuthorizationServiceInterfaceMock) {
+				authz.On("GetAccessibleResources", mock.Anything, mock.Anything, mock.Anything).
+					Return(&sysauthz.AccessibleResources{AllAllowed: true}, nil).
+					Once()
+			},
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitListCount", mock.Anything, mock.Anything).Return(0, nil).Once()
+				store.On("GetOrganizationUnitList", mock.Anything, 10, 0, mock.Anything).
+					Return([]providers.OrganizationUnitBasic{}, ErrResultLimitExceededInCompositeMode).
+					Once()
+			},
+			wantErr: &ErrorResultLimitExceeded,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			authz := sysauthzmock.NewSystemAuthorizationServiceInterfaceMock(suite.T())
+
+			if tc.setupStore != nil {
+				tc.setupStore(store)
+			}
+			if tc.setupAuthz != nil {
+				tc.setupAuthz(authz)
+			}
+
+			service := &organizationUnitService{ouStore: store, authzService: authz}
+			resp, err := service.GetOrganizationUnitList(context.Background(), tc.limit, tc.offset, nil)
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().NotNil(resp)
+				suite.Require().Equal(tc.wantTotal, resp.TotalResults)
+			}
+			store.AssertExpectations(suite.T())
+			authz.AssertExpectations(suite.T())
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_listAccessibleOrganizationUnits() {
+	testCases := []struct {
+		name       string
+		ids        []string
+		limit      int
+		offset     int
+		filter     *tidcommon.FilterGroup
+		setupStore func(*organizationUnitStoreInterfaceMock)
+		wantErr    *tidcommon.ServiceError
+		wantTotal  int
+		wantCount  int
+	}{
+		{
+			name:      "empty ids",
+			ids:       []string{},
+			limit:     10,
+			offset:    0,
+			wantTotal: 0,
+			wantCount: 0,
+		},
+		{
+			name:      "offset greater than total",
+			ids:       []string{"ou-1"},
+			limit:     10,
+			offset:    5,
+			wantTotal: 1,
+			wantCount: 0,
+		},
+		{
+			name:   "store error",
+			ids:    []string{"ou-1"},
+			limit:  10,
+			offset: 0,
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1"}).
+					Return([]providers.OrganizationUnitBasic{}, errors.New("boom")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+		{
+			name:   "success pagination",
+			ids:    []string{"ou-1", "ou-2", "ou-3"},
+			limit:  2,
+			offset: 1,
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-2", "ou-3"}).
+					Return([]providers.OrganizationUnitBasic{{ID: "ou-2"}, {ID: "ou-3"}}, nil).
+					Once()
+			},
+			wantTotal: 3,
+			wantCount: 2,
+		},
+		{
+			name:   "filter match — returns filtered subset",
+			ids:    []string{"ou-1", "ou-2"},
+			limit:  10,
+			offset: 0,
+			filter: &tidcommon.FilterGroup{Clauses: []tidcommon.FilterClause{
+				{
+					Expr: tidcommon.FilterExpression{
+						Attribute: "name",
+						Operator:  tidcommon.OperatorEq,
+						Value:     "Engineering",
+					},
+				},
+			}},
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1", "ou-2"}).
+					Return([]providers.OrganizationUnitBasic{
+						{ID: "ou-1", Name: "Engineering"},
+						{ID: "ou-2", Name: "Sales"},
+					}, nil).
+					Once()
+			},
+			wantTotal: 1,
+			wantCount: 1,
+		},
+		{
+			name:   "filter no match — returns empty",
+			ids:    []string{"ou-1", "ou-2"},
+			limit:  10,
+			offset: 0,
+			filter: &tidcommon.FilterGroup{Clauses: []tidcommon.FilterClause{
+				{
+					Expr: tidcommon.FilterExpression{
+						Attribute: "name",
+						Operator:  tidcommon.OperatorEq,
+						Value:     "__no_match__",
+					},
+				},
+			}},
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1", "ou-2"}).
+					Return([]providers.OrganizationUnitBasic{
+						{ID: "ou-1", Name: "Engineering"},
+						{ID: "ou-2", Name: "Sales"},
+					}, nil).
+					Once()
+			},
+			wantTotal: 0,
+			wantCount: 0,
+		},
+		{
+			name:   "filter store error",
+			ids:    []string{"ou-1"},
+			limit:  10,
+			offset: 0,
+			filter: &tidcommon.FilterGroup{Clauses: []tidcommon.FilterClause{
+				{
+					Expr: tidcommon.FilterExpression{
+						Attribute: "name",
+						Operator:  tidcommon.OperatorEq,
+						Value:     "Engineering",
+					},
+				},
+			}},
+			setupStore: func(store *organizationUnitStoreInterfaceMock) {
+				store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1"}).
+					Return(nil, errors.New("db error")).
+					Once()
+			},
+			wantErr: &tidcommon.InternalServerError,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		suite.Run(tc.name, func() {
+			store := newOrganizationUnitStoreInterfaceMock(suite.T())
+			if tc.setupStore != nil {
+				tc.setupStore(store)
+			}
+			service := &organizationUnitService{ouStore: store}
+			resp, err := service.listAccessibleOrganizationUnits(
+				context.Background(), tc.ids, tc.limit, tc.offset, tc.filter)
+
+			if tc.wantErr != nil {
+				suite.Require().NotNil(err)
+				suite.Require().Equal(*tc.wantErr, *err)
+			} else {
+				suite.Require().Nil(err)
+				suite.Require().NotNil(resp)
+				suite.Require().Equal(tc.wantTotal, resp.TotalResults)
+				suite.Require().Equal(tc.wantCount, resp.Count)
+			}
+			store.AssertExpectations(suite.T())
+		})
+	}
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_IsOrganizationUnitDeclarative() {
+	store := newOrganizationUnitStoreInterfaceMock(suite.T())
+	store.On("IsOrganizationUnitDeclarative", mock.Anything, "ou-1").Return(true).Once()
+
+	service := &organizationUnitService{ouStore: store}
+	res := service.IsOrganizationUnitDeclarative(context.Background(), "ou-1")
+	suite.Require().True(res)
+	store.AssertExpectations(suite.T())
+}
+
+func (suite *OrganizationUnitServiceTestSuite) TestOUService_GetOrganizationUnitHandlesByIDs() {
+	suite.Run("empty ids returns empty map", func() {
+		service := &organizationUnitService{}
+		result, svcErr := service.GetOrganizationUnitHandlesByIDs(
+			context.Background(), []string{})
+		suite.Require().Nil(svcErr)
+		suite.Require().Empty(result)
+	})
+
+	suite.Run("success", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1", "ou-2"}).
+			Return([]providers.OrganizationUnitBasic{
+				{ID: "ou-1", Handle: "handle-1"},
+				{ID: "ou-2", Handle: "handle-2"},
+			}, nil).Once()
+
+		service := &organizationUnitService{ouStore: store}
+		result, svcErr := service.GetOrganizationUnitHandlesByIDs(
+			context.Background(), []string{"ou-1", "ou-2"})
+		suite.Require().Nil(svcErr)
+		suite.Require().Len(result, 2)
+		suite.Equal("handle-1", result["ou-1"])
+		suite.Equal("handle-2", result["ou-2"])
+		store.AssertExpectations(suite.T())
+	})
+
+	suite.Run("store error returns internal server error", func() {
+		store := newOrganizationUnitStoreInterfaceMock(suite.T())
+		store.On("GetOrganizationUnitsByIDs", mock.Anything, []string{"ou-1"}).
+			Return(nil, errors.New("db error")).Once()
+
+		service := &organizationUnitService{ouStore: store}
+		result, svcErr := service.GetOrganizationUnitHandlesByIDs(
+			context.Background(), []string{"ou-1"})
+		suite.Require().Nil(result)
+		suite.Require().NotNil(svcErr)
+		suite.Equal(tidcommon.InternalServerError.Code, svcErr.Code)
+		store.AssertExpectations(suite.T())
+	})
+}

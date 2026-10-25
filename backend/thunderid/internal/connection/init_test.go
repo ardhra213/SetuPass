@@ -1,0 +1,202 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Package connection provides tests for the connections API. This file holds the shared
+// test fixtures plus the route-registration (Initialize) integration test.
+package connection
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/idp"
+	ncommon "github.com/thunder-id/thunderid/internal/notification/common"
+	"github.com/thunder-id/thunderid/internal/system/cmodels"
+	"github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/internal/system/kmprovider/defaultkm"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+	"github.com/thunder-id/thunderid/tests/mocks/idp/idpmock"
+	"github.com/thunder-id/thunderid/tests/mocks/notification/notificationmock"
+)
+
+// testCryptoKey is the shared key used so secret property encryption works in tests.
+const testCryptoKey = "0579f866ac7c9273580d0ff163fa01a7b2401a7ff3ddc3e3b14ae3136fa6025e"
+
+// initConfigWithTestCryptoKey initializes the server runtime with the test crypto key and
+// wires cmodels' package-level config crypto provider so secret Property encryption works.
+func initConfigWithTestCryptoKey(t *testing.T) {
+	t.Helper()
+	config.ResetServerRuntime()
+	require.NoError(t, config.InitializeServerRuntime("/tmp/test", &config.Config{
+		Crypto: config.CryptoConfig{Encryption: engineconfig.EncryptionConfig{Key: testCryptoKey}},
+	}))
+	_, cfgCryptoSvc, err := defaultkm.Initialize(nil)
+	require.NoError(t, err)
+	cmodels.SetConfigCryptoProvider(cfgCryptoSvc)
+}
+
+// newConnectionTestHandler returns a connection handler over fresh mock IdP and
+// notification-sender services, with the config crypto key initialized and cleaned up
+// automatically.
+func newConnectionTestHandler(t *testing.T) (*handler, *idpmock.IDPServiceInterfaceMock,
+	*notificationmock.NotificationSenderMgtSvcInterfaceMock) {
+	t.Helper()
+	initConfigWithTestCryptoKey(t)
+	t.Cleanup(config.ResetServerRuntime)
+	mockIDP := idpmock.NewIDPServiceInterfaceMock(t)
+	mockNotif := notificationmock.NewNotificationSenderMgtSvcInterfaceMock(t)
+	return newHandler(newService(mockIDP, mockNotif)), mockIDP, mockNotif
+}
+
+// mustProperty builds a property, failing the test on error.
+func mustProperty(t *testing.T, name, value string, isSecret bool) cmodels.Property {
+	t.Helper()
+	prop, err := cmodels.NewProperty(name, value, isSecret)
+	require.NoError(t, err)
+	return *prop
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// InitTestSuite drives the full route table registered by Initialize through a real
+// ServeMux, exercising route registration, CORS/OPTIONS handling, and path-value extraction.
+type InitTestSuite struct {
+	suite.Suite
+	mux       *http.ServeMux
+	mockIDP   *idpmock.IDPServiceInterfaceMock
+	mockNotif *notificationmock.NotificationSenderMgtSvcInterfaceMock
+}
+
+func TestInitSuite(t *testing.T) {
+	suite.Run(t, new(InitTestSuite))
+}
+
+func (s *InitTestSuite) SetupTest() {
+	initConfigWithTestCryptoKey(s.T())
+	s.mockIDP = idpmock.NewIDPServiceInterfaceMock(s.T())
+	s.mockNotif = notificationmock.NewNotificationSenderMgtSvcInterfaceMock(s.T())
+	s.mux = http.NewServeMux()
+	_, err := Initialize(s.mux, s.mockIDP, s.mockNotif)
+	s.Require().NoError(err)
+}
+
+func (s *InitTestSuite) TearDownTest() {
+	config.ResetServerRuntime()
+}
+
+func (s *InitTestSuite) TestRouteTable() {
+	githubDTO := &providers.IDPDTO{ID: "gh-1", Name: "GH", Type: providers.IDPTypeGitHub}
+	s.mockIDP.On("GetIdentityProviderList", mock.Anything).
+		Return([]idp.BasicIDPDTO{{ID: "gh-1", Name: "GH", Type: providers.IDPTypeGitHub}},
+			(*tidcommon.ServiceError)(nil))
+	s.mockIDP.On("CreateIdentityProvider", mock.Anything, mock.Anything).
+		Return(githubDTO, (*tidcommon.ServiceError)(nil))
+	s.mockIDP.On("GetIdentityProvider", mock.Anything, "gh-1").
+		Return(githubDTO, (*tidcommon.ServiceError)(nil))
+	s.mockIDP.On("UpdateIdentityProvider", mock.Anything, "gh-1", mock.Anything).
+		Return(githubDTO, (*tidcommon.ServiceError)(nil))
+	s.mockIDP.On("DeleteIdentityProvider", mock.Anything, "gh-1").
+		Return((*tidcommon.ServiceError)(nil))
+
+	twilioDTO := &ncommon.NotificationSenderDTO{
+		ID: "tw-1", Name: "TW", Type: ncommon.NotificationSenderTypeMessage,
+		Provider: ncommon.MessageProviderTypeTwilio,
+	}
+	s.mockNotif.On("ListSendersByType", mock.Anything, ncommon.NotificationSenderTypeMessage).
+		Return([]ncommon.NotificationSenderDTO{*twilioDTO}, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("CreateSender", mock.Anything, mock.MatchedBy(func(dto ncommon.NotificationSenderDTO) bool {
+		return dto.Provider == ncommon.MessageProviderTypeTwilio
+	})).Return(twilioDTO, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("GetSender", mock.Anything, "tw-1").
+		Return(twilioDTO, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("UpdateSender", mock.Anything, "tw-1", mock.Anything).
+		Return(twilioDTO, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("DeleteSender", mock.Anything, "tw-1").
+		Return((*tidcommon.ServiceError)(nil))
+
+	smsGatewayDTO := &ncommon.NotificationSenderDTO{
+		ID: "sg-1", Name: "SG", Type: ncommon.NotificationSenderTypeMessage,
+		Provider: ncommon.MessageProviderTypeCustom,
+	}
+	s.mockNotif.On("CreateSender", mock.Anything, mock.MatchedBy(func(dto ncommon.NotificationSenderDTO) bool {
+		return dto.Provider == ncommon.MessageProviderTypeCustom
+	})).Return(smsGatewayDTO, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("GetSender", mock.Anything, "sg-1").
+		Return(smsGatewayDTO, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("UpdateSender", mock.Anything, "sg-1", mock.Anything).
+		Return(smsGatewayDTO, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("DeleteSender", mock.Anything, "sg-1").
+		Return((*tidcommon.ServiceError)(nil))
+
+	emptyUsages := &resourcedependency.DependenciesResponse{
+		Usages: []resourcedependency.ResourceDependency{},
+	}
+	s.mockIDP.On("GetIDPUsages", mock.Anything, "gh-1").
+		Return(emptyUsages, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("GetSenderUsages", mock.Anything, "tw-1").
+		Return(emptyUsages, (*tidcommon.ServiceError)(nil))
+	s.mockNotif.On("GetSenderUsages", mock.Anything, "sg-1").
+		Return(emptyUsages, (*tidcommon.ServiceError)(nil))
+
+	body, _ := json.Marshal(githubConnectionRequest{
+		Name: "GH", ClientID: "c", ClientSecret: "s", RedirectURI: "https://app/cb",
+	})
+	twilioBody, _ := json.Marshal(twilioConnectionRequest{
+		Name: "TW", AccountSID: "AC00000000000000000000000000000000", AuthToken: "tok", SenderID: "+15005550006",
+	})
+	smsGatewayBody, _ := json.Marshal(smsGatewayConnectionRequest{
+		Name: "SG", URL: "https://sms.example.com/send", HTTPMethod: "POST",
+	})
+
+	cases := []struct {
+		method, path string
+		body         []byte
+		want         int
+	}{
+		{http.MethodGet, "/connections", nil, http.StatusOK},
+		{http.MethodOptions, "/connections", nil, http.StatusNoContent},
+		{http.MethodPost, "/connections/github", body, http.StatusCreated},
+		{http.MethodGet, "/connections/github", nil, http.StatusOK},
+		{http.MethodOptions, "/connections/github", nil, http.StatusNoContent},
+		{http.MethodGet, "/connections/github/gh-1", nil, http.StatusOK},
+		{http.MethodPut, "/connections/github/gh-1", body, http.StatusOK},
+		{http.MethodDelete, "/connections/github/gh-1", nil, http.StatusNoContent},
+		{http.MethodOptions, "/connections/github/gh-1", nil, http.StatusNoContent},
+		{http.MethodGet, "/connections/github/gh-1/usages", nil, http.StatusOK},
+		{http.MethodOptions, "/connections/github/gh-1/usages", nil, http.StatusNoContent},
+		{http.MethodPost, "/connections/twilio", twilioBody, http.StatusCreated},
+		{http.MethodGet, "/connections/twilio", nil, http.StatusOK},
+		{http.MethodOptions, "/connections/twilio", nil, http.StatusNoContent},
+		{http.MethodGet, "/connections/twilio/tw-1", nil, http.StatusOK},
+		{http.MethodPut, "/connections/twilio/tw-1", twilioBody, http.StatusOK},
+		{http.MethodDelete, "/connections/twilio/tw-1", nil, http.StatusNoContent},
+		{http.MethodOptions, "/connections/twilio/tw-1", nil, http.StatusNoContent},
+		{http.MethodGet, "/connections/twilio/tw-1/usages", nil, http.StatusOK},
+		{http.MethodOptions, "/connections/twilio/tw-1/usages", nil, http.StatusNoContent},
+		{http.MethodPost, "/connections/sms-gateway", smsGatewayBody, http.StatusCreated},
+		{http.MethodGet, "/connections/sms-gateway", nil, http.StatusOK},
+		{http.MethodOptions, "/connections/sms-gateway", nil, http.StatusNoContent},
+		{http.MethodGet, "/connections/sms-gateway/sg-1", nil, http.StatusOK},
+		{http.MethodPut, "/connections/sms-gateway/sg-1", smsGatewayBody, http.StatusOK},
+		{http.MethodDelete, "/connections/sms-gateway/sg-1", nil, http.StatusNoContent},
+		{http.MethodOptions, "/connections/sms-gateway/sg-1", nil, http.StatusNoContent},
+		{http.MethodGet, "/connections/sms-gateway/sg-1/usages", nil, http.StatusOK},
+		{http.MethodOptions, "/connections/sms-gateway/sg-1/usages", nil, http.StatusNoContent},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(tc.body))
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		s.Equal(tc.want, rr.Code, "%s %s", tc.method, tc.path)
+	}
+}

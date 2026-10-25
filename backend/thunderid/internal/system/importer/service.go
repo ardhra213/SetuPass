@@ -1,0 +1,1046 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package importer
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"time"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	agentmodel "github.com/thunder-id/thunderid/internal/agent/model"
+	appmodel "github.com/thunder-id/thunderid/internal/application/model"
+	"github.com/thunder-id/thunderid/internal/connection"
+	layoutmgt "github.com/thunder-id/thunderid/internal/design/layout/mgt"
+	thememgt "github.com/thunder-id/thunderid/internal/design/theme/mgt"
+	"github.com/thunder-id/thunderid/internal/entitytype"
+	flowmgt "github.com/thunder-id/thunderid/internal/flow/mgt"
+	"github.com/thunder-id/thunderid/internal/group"
+	ncommon "github.com/thunder-id/thunderid/internal/notification/common"
+	"github.com/thunder-id/thunderid/internal/resource"
+	"github.com/thunder-id/thunderid/internal/role"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/user"
+	"github.com/thunder-id/thunderid/internal/vc/credential"
+	"github.com/thunder-id/thunderid/internal/vc/presentation"
+)
+
+type applicationAdapter interface {
+	CreateApplication(ctx context.Context, app *appmodel.ApplicationDTO) (
+		*appmodel.ApplicationDTO,
+		*tidcommon.ServiceError,
+	)
+	GetApplication(ctx context.Context, appID string) (*providers.Application, *tidcommon.ServiceError)
+	UpdateApplication(ctx context.Context, appID string, app *appmodel.ApplicationDTO) (
+		*appmodel.ApplicationDTO,
+		*tidcommon.ServiceError,
+	)
+}
+
+type idpAdapter interface {
+	CreateIdentityProvider(ctx context.Context, idp *providers.IDPDTO) (*providers.IDPDTO, *tidcommon.ServiceError)
+	GetIdentityProvider(ctx context.Context, idpID string) (*providers.IDPDTO, *tidcommon.ServiceError)
+	GetIdentityProviderByName(ctx context.Context, idpName string) (*providers.IDPDTO, *tidcommon.ServiceError)
+	UpdateIdentityProvider(ctx context.Context, idpID string, idpDTO *providers.IDPDTO) (
+		*providers.IDPDTO,
+		*tidcommon.ServiceError,
+	)
+}
+
+// senderAdapter is the subset of notification.NotificationSenderMgtSvcInterface the importer
+// needs to import a connection document that resolves to a message notification sender.
+type senderAdapter interface {
+	CreateSender(ctx context.Context, sender ncommon.NotificationSenderDTO) (
+		*ncommon.NotificationSenderDTO,
+		*tidcommon.ServiceError,
+	)
+	GetSender(ctx context.Context, id string) (*ncommon.NotificationSenderDTO, *tidcommon.ServiceError)
+	UpdateSender(ctx context.Context, id string, sender ncommon.NotificationSenderDTO) (
+		*ncommon.NotificationSenderDTO,
+		*tidcommon.ServiceError,
+	)
+}
+
+type flowAdapter interface {
+	CreateFlow(ctx context.Context, flowDef *flowmgt.FlowDefinition) (
+		*providers.CompleteFlowDefinition,
+		*tidcommon.ServiceError,
+	)
+	GetFlow(ctx context.Context, flowID string) (*providers.CompleteFlowDefinition, *tidcommon.ServiceError)
+	GetFlowByHandle(ctx context.Context, handle string, flowType providers.FlowType) (*providers.CompleteFlowDefinition,
+		*tidcommon.ServiceError)
+	UpdateFlow(ctx context.Context, flowID string, flowDef *flowmgt.FlowDefinition) (*providers.CompleteFlowDefinition,
+		*tidcommon.ServiceError)
+}
+
+type ouAdapter interface {
+	CreateOrganizationUnit(ctx context.Context, request providers.OrganizationUnitRequestWithID) (
+		providers.OrganizationUnit,
+		*tidcommon.ServiceError,
+	)
+	GetOrganizationUnit(ctx context.Context, id string) (providers.OrganizationUnit, *tidcommon.ServiceError)
+	GetOrganizationUnitByPath(ctx context.Context, handlePath string) (
+		providers.OrganizationUnit,
+		*tidcommon.ServiceError,
+	)
+	UpdateOrganizationUnit(ctx context.Context, id string, request providers.OrganizationUnitRequestWithID) (
+		providers.OrganizationUnit,
+		*tidcommon.ServiceError)
+}
+
+type entityTypeAdapter interface {
+	CreateEntityType(ctx context.Context, category entitytype.TypeCategory,
+		request entitytype.CreateEntityTypeRequestWithID) (*entitytype.EntityType,
+		*tidcommon.ServiceError)
+	GetEntityType(ctx context.Context, category entitytype.TypeCategory, schemaID string,
+		includeDisplay bool) (*entitytype.EntityType,
+		*tidcommon.ServiceError)
+	GetEntityTypeByName(ctx context.Context, category entitytype.TypeCategory,
+		schemaName string) (*entitytype.EntityType, *tidcommon.ServiceError)
+	UpdateEntityType(ctx context.Context, category entitytype.TypeCategory, schemaID string,
+		request entitytype.UpdateEntityTypeRequest) (
+		*entitytype.EntityType,
+		*tidcommon.ServiceError)
+}
+
+type roleAdapter interface {
+	CreateRole(ctx context.Context, role role.RoleCreationDetail) (*role.RoleWithPermissionsAndAssignments,
+		*tidcommon.ServiceError)
+	GetRoleWithPermissions(ctx context.Context, id string) (*role.RoleWithPermissions, *tidcommon.ServiceError)
+	UpdateRoleWithPermissions(ctx context.Context, id string, role role.RoleUpdateDetail) (*role.RoleWithPermissions,
+		*tidcommon.ServiceError)
+}
+
+type roleAssignmentAdapter interface {
+	AddAssignments(ctx context.Context, id string, assignments []role.RoleAssignment) *tidcommon.ServiceError
+}
+
+type groupAdapter interface {
+	CreateGroup(ctx context.Context, request group.CreateGroupRequest) (*group.Group, *tidcommon.ServiceError)
+	GetGroup(ctx context.Context, groupID string, includeDisplay bool) (*group.Group, *tidcommon.ServiceError)
+	UpdateGroup(ctx context.Context, groupID string, request group.UpdateGroupRequest) (
+		*group.Group, *tidcommon.ServiceError)
+	AddGroupMembers(ctx context.Context, groupID string, members []group.Member) (
+		*group.Group, *tidcommon.ServiceError)
+}
+
+type resourceServerAdapter interface {
+	CreateResourceServer(ctx context.Context, rs providers.ResourceServer) (*providers.ResourceServer,
+		*tidcommon.ServiceError)
+	GetResourceServer(ctx context.Context, id string) (*providers.ResourceServer, *tidcommon.ServiceError)
+	UpdateResourceServer(ctx context.Context, id string, rs providers.ResourceServer) (*providers.ResourceServer,
+		*tidcommon.ServiceError)
+	CreateResource(ctx context.Context, resourceServerID string, res providers.Resource) (
+		*providers.Resource, *tidcommon.ServiceError)
+	GetResourceList(ctx context.Context, resourceServerID string, parentID *string, limit, offset int) (
+		*resource.ResourceList, *tidcommon.ServiceError)
+	CreateAction(ctx context.Context, resourceServerID string, resourceID *string, action providers.Action) (
+		*providers.Action, *tidcommon.ServiceError)
+}
+
+type themeAdapter interface {
+	CreateTheme(ctx context.Context,
+		theme thememgt.CreateThemeRequestWithID) (*thememgt.Theme, *tidcommon.ServiceError)
+	GetTheme(ctx context.Context, id string) (*thememgt.Theme, *tidcommon.ServiceError)
+	UpdateTheme(ctx context.Context,
+		id string, theme thememgt.UpdateThemeRequest) (*thememgt.Theme, *tidcommon.ServiceError)
+}
+
+type layoutAdapter interface {
+	CreateLayout(ctx context.Context,
+		layout layoutmgt.CreateLayoutRequestWithID) (*layoutmgt.Layout, *tidcommon.ServiceError)
+	GetLayout(ctx context.Context, id string) (*layoutmgt.Layout, *tidcommon.ServiceError)
+	UpdateLayout(ctx context.Context,
+		id string, layout layoutmgt.UpdateLayoutRequest) (*layoutmgt.Layout, *tidcommon.ServiceError)
+}
+
+type userAdapter interface {
+	CreateUser(ctx context.Context, user *user.User) (*user.User, *tidcommon.ServiceError)
+	GetUser(ctx context.Context, userID string, includeDisplay bool) (*user.User, *tidcommon.ServiceError)
+	UpdateUser(ctx context.Context, userID string, user *user.User) (*user.User, *tidcommon.ServiceError)
+	DeleteUser(ctx context.Context, userID string) *tidcommon.ServiceError
+	UpdateUserCredentials(ctx context.Context, userID string, credentials json.RawMessage) *tidcommon.ServiceError
+}
+
+type translationAdapter interface {
+	SetTranslationOverrides(ctx context.Context, language string, translations map[string]map[string]string) (
+		*providers.LanguageTranslationsResponse,
+		*tidcommon.ServiceError)
+}
+
+type agentAdapter interface {
+	CreateAgent(ctx context.Context, agent *agentmodel.Agent) (
+		*agentmodel.AgentCompleteResponse, *tidcommon.ServiceError)
+	GetAgent(ctx context.Context, agentID string, includeDisplay bool) (
+		*agentmodel.AgentGetResponse, *tidcommon.ServiceError)
+	UpdateAgent(ctx context.Context, agentID string, req *agentmodel.UpdateAgentRequest) (
+		*agentmodel.AgentCompleteResponse, *tidcommon.ServiceError)
+}
+
+type presentationDefinitionAdapter interface {
+	CreatePresentationDefinition(ctx context.Context, dto *presentation.PresentationDefinitionDTO) (
+		*presentation.PresentationDefinitionDTO, *tidcommon.ServiceError)
+	GetPresentationDefinition(ctx context.Context, id string) (
+		*presentation.PresentationDefinitionDTO, *tidcommon.ServiceError)
+	UpdatePresentationDefinition(ctx context.Context, id string, dto *presentation.PresentationDefinitionDTO) (
+		*presentation.PresentationDefinitionDTO, *tidcommon.ServiceError)
+}
+
+type credentialConfigurationAdapter interface {
+	CreateCredentialConfiguration(ctx context.Context, dto *credential.CredentialConfigurationDTO) (
+		*credential.CredentialConfigurationDTO, *tidcommon.ServiceError)
+	GetCredentialConfiguration(ctx context.Context, id string) (
+		*credential.CredentialConfigurationDTO, *tidcommon.ServiceError)
+	UpdateCredentialConfiguration(ctx context.Context, id string, dto *credential.CredentialConfigurationDTO) (
+		*credential.CredentialConfigurationDTO, *tidcommon.ServiceError)
+}
+
+// ImportServiceInterface defines runtime resource import and declarative resource deletion operations.
+type ImportServiceInterface interface {
+	ImportResources(ctx context.Context, request *ImportRequest) (*ImportResponse, *tidcommon.ServiceError)
+	DeleteResource(ctx context.Context, request *DeleteResourceRequest) (
+		*DeleteResourceResponse,
+		*tidcommon.ServiceError,
+	)
+}
+
+const (
+	importTargetRuntime           = "runtime"
+	importTargetFile              = "file"
+	invalidOAuthConfigurationCode = "APP-1024"
+)
+
+type importService struct {
+	applicationService             applicationAdapter
+	idpService                     idpAdapter
+	senderService                  senderAdapter
+	flowService                    flowAdapter
+	ouService                      ouAdapter
+	entityTypeService              entityTypeAdapter
+	roleService                    roleAdapter
+	roleAssignmentService          roleAssignmentAdapter
+	groupService                   groupAdapter
+	resourceService                resourceServerAdapter
+	themeService                   themeAdapter
+	layoutService                  layoutAdapter
+	userService                    userAdapter
+	translationService             translationAdapter
+	agentService                   agentAdapter
+	presentationDefinitionService  presentationDefinitionAdapter
+	credentialConfigurationService credentialConfigurationAdapter
+	serverConfigService            serverConfigAdapter
+}
+
+func newImportService(
+	applicationService applicationAdapter,
+	idpService idpAdapter,
+	senderService senderAdapter,
+	flowService flowAdapter,
+	ouService ouAdapter,
+	entityTypeService entityTypeAdapter,
+	roleService roleAdapter,
+	roleAssignmentService roleAssignmentAdapter,
+	groupService groupAdapter,
+	resourceService resourceServerAdapter,
+	themeService themeAdapter,
+	layoutService layoutAdapter,
+	userService userAdapter,
+	translationService translationAdapter,
+	agentService agentAdapter,
+	presentationDefinitionService presentationDefinitionAdapter,
+	credentialConfigurationService credentialConfigurationAdapter,
+	serverConfigService serverConfigAdapter,
+) ImportServiceInterface {
+	return &importService{
+		applicationService:             applicationService,
+		idpService:                     idpService,
+		senderService:                  senderService,
+		flowService:                    flowService,
+		ouService:                      ouService,
+		entityTypeService:              entityTypeService,
+		roleService:                    roleService,
+		roleAssignmentService:          roleAssignmentService,
+		groupService:                   groupService,
+		resourceService:                resourceService,
+		themeService:                   themeService,
+		layoutService:                  layoutService,
+		userService:                    userService,
+		translationService:             translationService,
+		agentService:                   agentService,
+		presentationDefinitionService:  presentationDefinitionService,
+		credentialConfigurationService: credentialConfigurationService,
+		serverConfigService:            serverConfigService,
+	}
+}
+
+func (s *importService) ImportResources(
+	ctx context.Context, request *ImportRequest,
+) (*ImportResponse, *tidcommon.ServiceError) {
+	if request == nil || request.Content == "" {
+		return nil, tidcommon.CustomServiceError(ErrorInvalidImportRequest,
+			tidcommon.I18nMessage{Key: "error.import.emptyContent", DefaultValue: "import content cannot be empty"})
+	}
+
+	options := request.Options
+	if options == nil {
+		options = &ImportOptions{}
+	}
+	if options.Upsert == nil {
+		upsertEnabled := true
+		options.Upsert = &upsertEnabled
+	}
+	if options.ContinueOnError == nil {
+		continueOnErrorEnabled := true
+		options.ContinueOnError = &continueOnErrorEnabled
+	}
+	if options.Target == "" {
+		options.Target = importTargetRuntime
+	}
+
+	if options.Target == importTargetFile {
+		return nil, tidcommon.CustomServiceError(
+			ErrorInvalidImportRequest,
+			tidcommon.I18nMessage{
+				Key:          "error.import.fileTargetNotSupported",
+				DefaultValue: "file target is not supported; use runtime target",
+			},
+		)
+	}
+
+	resolvedContent, err := resolveTemplate(request.Content, request.Variables)
+	if err != nil {
+		log.GetLogger().Warn(ctx, "Import template resolution failed", log.String("error", err.Error()))
+		return nil, tidcommon.CustomServiceError(ErrorTemplateResolutionFailed,
+			tidcommon.I18nMessage{Key: "error.import.dynamic", DefaultValue: err.Error()})
+	}
+
+	docs, err := parseDocuments(resolvedContent)
+	if err != nil {
+		log.GetLogger().Warn(ctx, "Import YAML parsing failed", log.String("error", err.Error()))
+		return nil, tidcommon.CustomServiceError(ErrorInvalidYAMLContent,
+			tidcommon.I18nMessage{Key: "error.import.dynamic", DefaultValue: err.Error()})
+	}
+
+	results := make([]ImportItemOutcome, 0, len(docs))
+	imported := 0
+	failed := 0
+	flowIDAliases := make(map[string]string)
+
+	orderedDocs := orderDocumentsByDependencies(docs)
+
+	for _, doc := range orderedDocs {
+		originalFlowID := ""
+		if doc.ResourceType == resourceTypeFlow {
+			var flowReq providers.CompleteFlowDefinition
+			if err := doc.Node.Decode(&flowReq); err == nil {
+				originalFlowID = flowReq.ID
+			}
+		}
+
+		outcome := s.importDocument(ctx, doc, options, request.DryRun, flowIDAliases)
+		results = append(results, outcome)
+
+		if doc.ResourceType == resourceTypeFlow && outcome.Status == statusSuccess && originalFlowID != "" &&
+			outcome.ResourceID != "" && originalFlowID != outcome.ResourceID {
+			flowIDAliases[originalFlowID] = outcome.ResourceID
+		}
+
+		if outcome.Status == statusSuccess {
+			imported++
+		} else {
+			failed++
+			if !options.IsContinueOnErrorEnabled() {
+				break
+			}
+		}
+	}
+
+	return &ImportResponse{
+		Summary: &ImportSummary{
+			TotalDocuments: len(docs),
+			Imported:       imported,
+			Failed:         failed,
+			ImportedAt:     time.Now().UTC(),
+		},
+		Results: results,
+	}, nil
+}
+
+func (s *importService) DeleteResource(
+	ctx context.Context, request *DeleteResourceRequest,
+) (*DeleteResourceResponse, *tidcommon.ServiceError) {
+	_ = ctx
+
+	if request == nil || request.ResourceType == "" || request.ResourceKey == "" {
+		return nil, tidcommon.CustomServiceError(
+			ErrorInvalidImportRequest,
+			tidcommon.I18nMessage{
+				Key:          "error.import.missingDeleteFields",
+				DefaultValue: "resourceType and resourceKey are required",
+			},
+		)
+	}
+
+	deletedFile, svcErr := deleteFileBackedResource(request.ResourceType, request.ResourceKey)
+	if svcErr != nil {
+		return nil, svcErr
+	}
+
+	return &DeleteResourceResponse{
+		ResourceType: request.ResourceType,
+		ResourceKey:  request.ResourceKey,
+		DeletedFile:  deletedFile,
+	}, nil
+}
+
+func (s *importService) importDocument(
+	ctx context.Context, doc parsedDocument, options *ImportOptions, dryRun bool, flowIDAliases map[string]string,
+) ImportItemOutcome {
+	switch doc.ResourceType {
+	case resourceTypeApplication:
+		return s.importApplication(ctx, doc, options, dryRun, flowIDAliases)
+	case resourceTypeConnection:
+		return s.importConnection(ctx, doc, options, dryRun)
+	case resourceTypeFlow:
+		return s.importFlow(ctx, doc, options, dryRun)
+	case resourceTypeOrganizationUnit:
+		return s.importOrganizationUnit(ctx, doc, options, dryRun)
+	case resourceTypeEntityType:
+		return s.importEntityType(ctx, doc, options, dryRun)
+	case resourceTypeAgentType:
+		return s.importEntityType(ctx, doc, options, dryRun)
+	case resourceTypeRole:
+		return s.importRole(ctx, doc, options, dryRun)
+	case resourceTypeGroup:
+		return s.importGroup(ctx, doc, options, dryRun)
+	case resourceTypeResourceServer:
+		return s.importResourceServer(ctx, doc, options, dryRun)
+	case resourceTypeTheme:
+		return s.importTheme(ctx, doc, options, dryRun)
+	case resourceTypeLayout:
+		return s.importLayout(ctx, doc, options, dryRun)
+	case resourceTypeUser:
+		return s.importUser(ctx, doc, options, dryRun)
+	case resourceTypeTranslation:
+		return s.importTranslation(ctx, doc, dryRun)
+	case resourceTypeAgent:
+		return s.importAgent(ctx, doc, options, dryRun, flowIDAliases)
+	case resourceTypePresentationDefinition:
+		return s.importPresentationDefinition(ctx, doc, options, dryRun)
+	case resourceTypeCredentialConfiguration:
+		return s.importCredentialConfiguration(ctx, doc, options, dryRun)
+	case resourceTypeServerConfig:
+		return s.importServerConfig(ctx, doc, dryRun)
+	default:
+		return ImportItemOutcome{
+			ResourceType: doc.ResourceType,
+			Status:       statusFailed,
+			Code:         ErrorInvalidImportRequest.Code,
+			Message:      "unsupported resource document",
+		}
+	}
+}
+
+// importConnection imports a "connection" document, dispatching to the identity-provider or
+// notification-sender adapter based on which DTO connection.ParseConnectionFromNode resolves.
+func (s *importService) importConnection(
+	ctx context.Context, doc parsedDocument, options *ImportOptions, dryRun bool,
+) ImportItemOutcome {
+	idpDTO, senderDTO, err := connection.ParseConnectionFromNode(doc.Node)
+	if err != nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeConnection,
+			Status:       statusFailed,
+			Code:         ErrorInvalidYAMLContent.Code,
+			Message:      fmt.Sprintf("failed to decode connection document: %v", err),
+		}
+	}
+
+	if idpDTO != nil {
+		return s.importConnectionIDP(ctx, idpDTO, options, dryRun)
+	}
+	return s.importConnectionSender(ctx, senderDTO, options, dryRun)
+}
+
+func (s *importService) importConnectionIDP(
+	ctx context.Context, req *providers.IDPDTO, options *ImportOptions, dryRun bool,
+) ImportItemOutcome {
+	if s.idpService == nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeConnection,
+			Status:       statusFailed,
+			Code:         ErrorInvalidImportRequest.Code,
+			Message:      "identity provider adapter is not configured",
+		}
+	}
+
+	if dryRun {
+		if options.IsUpsertEnabled() && req.ID != "" {
+			_, svcErr := s.idpService.GetIdentityProvider(ctx, req.ID)
+			if svcErr == nil {
+				return successOutcome(resourceTypeConnection, req.ID, req.Name, operationUpdate)
+			}
+
+			if !isNotFoundServiceError(svcErr) {
+				return serviceErrorOutcome(resourceTypeConnection, req.ID, req.Name, operationUpdate, svcErr)
+			}
+		}
+
+		return successOutcome(resourceTypeConnection, req.ID, req.Name, operationCreate)
+	}
+
+	if options.IsUpsertEnabled() && req.ID != "" {
+		updated, svcErr := s.idpService.UpdateIdentityProvider(ctx, req.ID, req)
+		if svcErr == nil {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeConnection,
+				ResourceID:   updated.ID,
+				ResourceName: updated.Name,
+				Operation:    operationUpdate,
+				Status:       statusSuccess,
+			}
+		}
+
+		if !isNotFoundServiceError(svcErr) {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeConnection,
+				ResourceID:   req.ID,
+				ResourceName: req.Name,
+				Operation:    operationUpdate,
+				Status:       statusFailed,
+				Code:         svcErr.Code,
+				Message:      svcErr.Error.DefaultValue,
+			}
+		}
+	}
+
+	created, svcErr := s.idpService.CreateIdentityProvider(ctx, req)
+	if svcErr != nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeConnection,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Operation:    operationCreate,
+			Status:       statusFailed,
+			Code:         svcErr.Code,
+			Message:      svcErr.Error.DefaultValue,
+		}
+	}
+
+	return ImportItemOutcome{
+		ResourceType: resourceTypeConnection,
+		ResourceID:   created.ID,
+		ResourceName: created.Name,
+		Operation:    operationCreate,
+		Status:       statusSuccess,
+	}
+}
+
+func (s *importService) importConnectionSender(
+	ctx context.Context, req *ncommon.NotificationSenderDTO, options *ImportOptions, dryRun bool,
+) ImportItemOutcome {
+	if s.senderService == nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeConnection,
+			Status:       statusFailed,
+			Code:         ErrorInvalidImportRequest.Code,
+			Message:      "notification sender adapter is not configured",
+		}
+	}
+
+	if dryRun {
+		if options.IsUpsertEnabled() && req.ID != "" {
+			_, svcErr := s.senderService.GetSender(ctx, req.ID)
+			if svcErr == nil {
+				return successOutcome(resourceTypeConnection, req.ID, req.Name, operationUpdate)
+			}
+
+			if !isNotFoundServiceError(svcErr) {
+				return serviceErrorOutcome(resourceTypeConnection, req.ID, req.Name, operationUpdate, svcErr)
+			}
+		}
+
+		return successOutcome(resourceTypeConnection, req.ID, req.Name, operationCreate)
+	}
+
+	if options.IsUpsertEnabled() && req.ID != "" {
+		updated, svcErr := s.senderService.UpdateSender(ctx, req.ID, *req)
+		if svcErr == nil {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeConnection,
+				ResourceID:   updated.ID,
+				ResourceName: updated.Name,
+				Operation:    operationUpdate,
+				Status:       statusSuccess,
+			}
+		}
+
+		if !isNotFoundServiceError(svcErr) {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeConnection,
+				ResourceID:   req.ID,
+				ResourceName: req.Name,
+				Operation:    operationUpdate,
+				Status:       statusFailed,
+				Code:         svcErr.Code,
+				Message:      svcErr.Error.DefaultValue,
+			}
+		}
+	}
+
+	created, svcErr := s.senderService.CreateSender(ctx, *req)
+	if svcErr != nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeConnection,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Operation:    operationCreate,
+			Status:       statusFailed,
+			Code:         svcErr.Code,
+			Message:      svcErr.Error.DefaultValue,
+		}
+	}
+
+	return ImportItemOutcome{
+		ResourceType: resourceTypeConnection,
+		ResourceID:   created.ID,
+		ResourceName: created.Name,
+		Operation:    operationCreate,
+		Status:       statusSuccess,
+	}
+}
+
+func (s *importService) importFlow(
+	ctx context.Context, doc parsedDocument, options *ImportOptions, dryRun bool,
+) ImportItemOutcome {
+	if s.flowService == nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeFlow,
+			Status:       statusFailed,
+			Code:         ErrorInvalidImportRequest.Code,
+			Message:      "flow adapter is not configured",
+		}
+	}
+
+	var req providers.CompleteFlowDefinition
+	if err := doc.Node.Decode(&req); err != nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeFlow,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Status:       statusFailed,
+			Code:         ErrorInvalidYAMLContent.Code,
+			Message:      fmt.Sprintf("failed to decode flow document: %v", err),
+		}
+	}
+
+	flowDef := &flowmgt.FlowDefinition{
+		ID:       req.ID,
+		Handle:   req.Handle,
+		Name:     req.Name,
+		FlowType: req.FlowType,
+		Nodes:    req.Nodes,
+	}
+
+	if dryRun {
+		if options.IsUpsertEnabled() && req.ID != "" {
+			_, svcErr := s.flowService.GetFlow(ctx, req.ID)
+			if svcErr == nil {
+				return successOutcome(resourceTypeFlow, req.ID, req.Name, operationUpdate)
+			}
+
+			if !isNotFoundServiceError(svcErr) {
+				return serviceErrorOutcome(resourceTypeFlow, req.ID, req.Name, operationUpdate, svcErr)
+			}
+
+			existingByHandle, handleErr := s.flowService.GetFlowByHandle(ctx, req.Handle, req.FlowType)
+			if handleErr == nil {
+				return successOutcome(resourceTypeFlow, existingByHandle.ID, req.Name, operationUpdate)
+			}
+
+			if !isNotFoundServiceError(handleErr) {
+				return serviceErrorOutcome(resourceTypeFlow, req.ID, req.Name, operationUpdate, handleErr)
+			}
+		}
+
+		return successOutcome(resourceTypeFlow, req.ID, req.Name, operationCreate)
+	}
+
+	if options.IsUpsertEnabled() && req.ID != "" {
+		updated, svcErr := s.flowService.UpdateFlow(ctx, req.ID, flowDef)
+		if svcErr == nil {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeFlow,
+				ResourceID:   updated.ID,
+				ResourceName: updated.Name,
+				Operation:    operationUpdate,
+				Status:       statusSuccess,
+			}
+		}
+
+		if !isNotFoundServiceError(svcErr) {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeFlow,
+				ResourceID:   req.ID,
+				ResourceName: req.Name,
+				Operation:    operationUpdate,
+				Status:       statusFailed,
+				Code:         svcErr.Code,
+				Message:      svcErr.Error.DefaultValue,
+			}
+		}
+	}
+
+	created, svcErr := s.flowService.CreateFlow(ctx, flowDef)
+	if svcErr != nil {
+		if options.IsUpsertEnabled() && req.ID != "" && svcErr.Code == flowmgt.ErrorDuplicateFlowHandle.Code {
+			existingByHandle, handleErr := s.flowService.GetFlowByHandle(ctx, req.Handle, req.FlowType)
+			if handleErr == nil {
+				updated, updateErr := s.flowService.UpdateFlow(ctx, existingByHandle.ID, flowDef)
+				if updateErr != nil {
+					return ImportItemOutcome{
+						ResourceType: resourceTypeFlow,
+						ResourceID:   existingByHandle.ID,
+						ResourceName: req.Name,
+						Operation:    operationUpdate,
+						Status:       statusFailed,
+						Code:         updateErr.Code,
+						Message:      updateErr.Error.DefaultValue,
+					}
+				}
+
+				return ImportItemOutcome{
+					ResourceType: resourceTypeFlow,
+					ResourceID:   updated.ID,
+					ResourceName: updated.Name,
+					Operation:    operationUpdate,
+					Status:       statusSuccess,
+				}
+			}
+
+			if !isNotFoundServiceError(handleErr) {
+				return ImportItemOutcome{
+					ResourceType: resourceTypeFlow,
+					ResourceID:   req.ID,
+					ResourceName: req.Name,
+					Operation:    operationUpdate,
+					Status:       statusFailed,
+					Code:         handleErr.Code,
+					Message:      handleErr.Error.DefaultValue,
+				}
+			}
+		}
+
+		return ImportItemOutcome{
+			ResourceType: resourceTypeFlow,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Operation:    operationCreate,
+			Status:       statusFailed,
+			Code:         svcErr.Code,
+			Message:      svcErr.Error.DefaultValue,
+		}
+	}
+
+	return ImportItemOutcome{
+		ResourceType: resourceTypeFlow,
+		ResourceID:   created.ID,
+		ResourceName: created.Name,
+		Operation:    operationCreate,
+		Status:       statusSuccess,
+	}
+}
+
+var resourceDependencyOrder = []string{
+	resourceTypeOrganizationUnit,
+	resourceTypeEntityType,
+	resourceTypeAgentType,
+	resourceTypeResourceServer,
+	resourceTypeConnection,
+	resourceTypeFlow,
+	resourceTypeTheme,
+	resourceTypeLayout,
+	resourceTypeApplication,
+	resourceTypeAgent,
+	resourceTypeUser,
+	resourceTypeGroup,
+	resourceTypeRole,
+	resourceTypeTranslation,
+	resourceTypePresentationDefinition,
+	resourceTypeCredentialConfiguration,
+}
+
+func orderDocumentsByDependencies(docs []parsedDocument) []parsedDocument {
+	priority := make(map[string]int, len(resourceDependencyOrder))
+	for i, resourceType := range resourceDependencyOrder {
+		priority[resourceType] = i
+	}
+
+	ordered := make([]parsedDocument, len(docs))
+	copy(ordered, docs)
+
+	sort.SliceStable(ordered, func(i, j int) bool {
+		pi, okI := priority[ordered[i].ResourceType]
+		if !okI {
+			pi = len(priority) + 1
+		}
+		pj, okJ := priority[ordered[j].ResourceType]
+		if !okJ {
+			pj = len(priority) + 1
+		}
+		if pi != pj {
+			return pi < pj
+		}
+		return ordered[i].Sequence < ordered[j].Sequence
+	})
+
+	return ordered
+}
+
+func (s *importService) importApplication(
+	ctx context.Context, doc parsedDocument, options *ImportOptions, dryRun bool, flowIDAliases map[string]string,
+) ImportItemOutcome {
+	var req appmodel.ApplicationRequestWithID
+	if err := doc.Node.Decode(&req); err != nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeApplication,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Status:       statusFailed,
+			Code:         ErrorInvalidYAMLContent.Code,
+			Message:      fmt.Sprintf("failed to decode application document: %v", err),
+		}
+	}
+
+	if s.applicationService == nil {
+		return ImportItemOutcome{
+			ResourceType: resourceTypeApplication,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Status:       statusFailed,
+			Code:         ErrorAdapterNotConfigured.Code,
+			Message:      "application adapter not configured",
+		}
+	}
+
+	if mappedFlowID, ok := flowIDAliases[req.AuthFlowID]; ok {
+		req.AuthFlowID = mappedFlowID
+	}
+	if mappedFlowID, ok := flowIDAliases[req.RegistrationFlowID]; ok {
+		req.RegistrationFlowID = mappedFlowID
+	}
+	if mappedFlowID, ok := flowIDAliases[req.SignOutFlowID]; ok {
+		req.SignOutFlowID = mappedFlowID
+	}
+
+	appDTO := applicationRequestToDTO(&req)
+	normalizeOAuthConfigForImport(ctx, appDTO)
+	if dryRun {
+		if options.IsUpsertEnabled() && req.ID != "" {
+			_, svcErr := s.applicationService.GetApplication(ctx, req.ID)
+			if svcErr == nil {
+				return successOutcome(resourceTypeApplication, req.ID, req.Name, operationUpdate)
+			}
+
+			if !isNotFoundServiceError(svcErr) {
+				return serviceErrorOutcome(resourceTypeApplication, req.ID, req.Name, operationUpdate, svcErr)
+			}
+		}
+
+		return successOutcome(resourceTypeApplication, req.ID, req.Name, operationCreate)
+	}
+
+	if options.IsUpsertEnabled() && req.ID != "" {
+		updated, svcErr := s.applicationService.UpdateApplication(ctx, req.ID, appDTO)
+		if svcErr == nil {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeApplication,
+				ResourceID:   updated.ID,
+				ResourceName: updated.Name,
+				Operation:    operationUpdate,
+				Status:       statusSuccess,
+			}
+		}
+
+		if !isNotFoundServiceError(svcErr) {
+			return ImportItemOutcome{
+				ResourceType: resourceTypeApplication,
+				ResourceID:   req.ID,
+				ResourceName: req.Name,
+				Operation:    operationUpdate,
+				Status:       statusFailed,
+				Code:         svcErr.Code,
+				Message:      svcErr.Error.DefaultValue,
+			}
+		}
+	}
+
+	created, svcErr := s.applicationService.CreateApplication(ctx, appDTO)
+	if svcErr != nil {
+		failureLogFields := []log.Field{
+			log.String("appID", req.ID),
+			log.String("name", req.Name),
+			log.String("code", svcErr.Code),
+			log.String("error", svcErr.Error.DefaultValue),
+			log.String("authFlowID", appDTO.AuthFlowID),
+			log.String("registrationFlowID", appDTO.RegistrationFlowID),
+			log.Bool("isRegistrationFlowEnabled", appDTO.IsRegistrationFlowEnabled),
+		}
+		if svcErr.ErrorDescription.DefaultValue != "" {
+			failureLogFields = append(failureLogFields,
+				log.String("errorDescription", svcErr.ErrorDescription.DefaultValue))
+		}
+		if oauthConfig := getOAuthConfigForImportLog(appDTO); oauthConfig != nil {
+			failureLogFields = append(failureLogFields,
+				log.String("clientID", oauthConfig.ClientID),
+				log.Bool("hasClientSecret", oauthConfig.ClientSecret != ""),
+				log.Bool("publicClient", oauthConfig.PublicClient),
+				log.Bool("pkceRequired", oauthConfig.PKCERequired),
+				log.String("tokenEndpointAuthMethod", string(oauthConfig.TokenEndpointAuthMethod)),
+				log.Any("grantTypes", oauthConfig.GrantTypes),
+				log.Any("responseTypes", oauthConfig.ResponseTypes),
+				log.Any("redirectURIs", oauthConfig.RedirectURIs),
+			)
+		}
+
+		log.GetLogger().Warn(ctx, "Application import create failed", failureLogFields...)
+
+		if svcErr.Code == invalidOAuthConfigurationCode {
+			log.GetLogger().Debug(ctx,
+				"Application import failed due to invalid OAuth configuration", failureLogFields...)
+		}
+
+		return ImportItemOutcome{
+			ResourceType: resourceTypeApplication,
+			ResourceID:   req.ID,
+			ResourceName: req.Name,
+			Operation:    operationCreate,
+			Status:       statusFailed,
+			Code:         svcErr.Code,
+			Message:      svcErr.Error.DefaultValue,
+		}
+	}
+
+	return ImportItemOutcome{
+		ResourceType: resourceTypeApplication,
+		ResourceID:   created.ID,
+		ResourceName: created.Name,
+		Operation:    operationCreate,
+		Status:       statusSuccess,
+	}
+}
+
+func applicationRequestToDTO(req *appmodel.ApplicationRequestWithID) *appmodel.ApplicationDTO {
+	appDTO := &appmodel.ApplicationDTO{
+		ID:          req.ID,
+		OUID:        req.OUID,
+		OUHandle:    req.OUHandle,
+		Name:        req.Name,
+		Description: req.Description,
+		InboundAuthProfile: providers.InboundAuthProfile{
+			AuthFlowID:                req.AuthFlowID,
+			AuthFlowHandle:            req.AuthFlowHandle,
+			RegistrationFlowID:        req.RegistrationFlowID,
+			RegistrationFlowHandle:    req.RegistrationFlowHandle,
+			IsRegistrationFlowEnabled: req.IsRegistrationFlowEnabled,
+			RecoveryFlowID:            req.RecoveryFlowID,
+			RecoveryFlowHandle:        req.RecoveryFlowHandle,
+			IsRecoveryFlowEnabled:     req.IsRecoveryFlowEnabled,
+			SignOutFlowID:             req.SignOutFlowID,
+			SignOutFlowHandle:         req.SignOutFlowHandle,
+			ThemeID:                   req.ThemeID,
+			LayoutID:                  req.LayoutID,
+			Assertion:                 req.Assertion,
+			LoginConsent:              req.LoginConsent,
+			AllowedUserTypes:          req.AllowedUserTypes,
+		},
+		Type:       req.Type,
+		Template:   req.Template,
+		FlowSecret: req.FlowSecret,
+		URL:        req.URL,
+		LogoURL:    req.LogoURL,
+		TosURI:     req.TosURI,
+		PolicyURI:  req.PolicyURI,
+		Contacts:   req.Contacts,
+		Metadata:   req.Metadata,
+	}
+
+	if len(req.InboundAuthConfig) > 0 {
+		inboundAuthConfigDTOs := make([]providers.InboundAuthConfigWithSecret, 0, len(req.InboundAuthConfig))
+		for _, config := range req.InboundAuthConfig {
+			if config.Type != providers.OAuthInboundAuthType || config.OAuthConfig == nil {
+				continue
+			}
+
+			inboundAuthConfigDTOs = append(inboundAuthConfigDTOs, providers.InboundAuthConfigWithSecret{
+				Type: config.Type,
+				OAuthConfig: &providers.OAuthConfigWithSecret{
+					ClientID:                           config.OAuthConfig.ClientID,
+					ClientSecret:                       config.OAuthConfig.ClientSecret,
+					RedirectURIs:                       config.OAuthConfig.RedirectURIs,
+					PostLogoutRedirectURIs:             config.OAuthConfig.PostLogoutRedirectURIs,
+					GrantTypes:                         config.OAuthConfig.GrantTypes,
+					ResponseTypes:                      config.OAuthConfig.ResponseTypes,
+					TokenEndpointAuthMethod:            config.OAuthConfig.TokenEndpointAuthMethod,
+					PKCERequired:                       config.OAuthConfig.PKCERequired,
+					PublicClient:                       config.OAuthConfig.PublicClient,
+					RequirePushedAuthorizationRequests: config.OAuthConfig.RequirePushedAuthorizationRequests,
+					Token:                              config.OAuthConfig.Token,
+					Scopes:                             config.OAuthConfig.Scopes,
+					UserInfo:                           config.OAuthConfig.UserInfo,
+					ScopeClaims:                        config.OAuthConfig.ScopeClaims,
+					Certificate:                        config.OAuthConfig.Certificate,
+					AcrValues:                          config.OAuthConfig.AcrValues,
+				},
+			})
+		}
+		appDTO.InboundAuthConfig = inboundAuthConfigDTOs
+	}
+
+	return appDTO
+}
+
+func getOAuthConfigForImportLog(appDTO *appmodel.ApplicationDTO) *providers.OAuthConfigWithSecret {
+	if appDTO == nil {
+		return nil
+	}
+
+	for _, inboundAuth := range appDTO.InboundAuthConfig {
+		if inboundAuth.Type == providers.OAuthInboundAuthType && inboundAuth.OAuthConfig != nil {
+			return inboundAuth.OAuthConfig
+		}
+	}
+
+	return nil
+}
+
+func normalizeOAuthConfigForImport(ctx context.Context, appDTO *appmodel.ApplicationDTO) {
+	oauthConfig := getOAuthConfigForImportLog(appDTO)
+	if oauthConfig == nil {
+		return
+	}
+
+	if oauthConfig.PublicClient &&
+		oauthConfig.TokenEndpointAuthMethod == providers.TokenEndpointAuthMethodNone &&
+		oauthConfig.ClientSecret != "" {
+		log.GetLogger().Debug(ctx,
+			"Dropping client_secret for public client import with token endpoint auth method 'none'",
+			log.String("appID", appDTO.ID),
+			log.String("name", appDTO.Name),
+			log.String("clientID", oauthConfig.ClientID))
+		oauthConfig.ClientSecret = ""
+	}
+}
+
+func isNotFoundServiceError(svcErr *tidcommon.ServiceError) bool {
+	if svcErr == nil {
+		return false
+	}
+	_, ok := notFoundErrorCodes[svcErr.Code]
+	return ok
+}

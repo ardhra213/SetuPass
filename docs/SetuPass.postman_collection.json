@@ -1,0 +1,166 @@
+{
+  "info": {
+    "name": "SetuPass Native SSO \u2014 smoke checks and exchange reference",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Smoke checks are read-only apart from an intentionally invalid token request. The successful native flow runs on Android. Negative binding and scope tests are in the Go test suite."
+  },
+  "variable": [
+    {
+      "key": "issuer",
+      "value": "http://localhost:8088"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. OpenID discovery",
+      "request": {
+        "method": "GET",
+        "url": "{{issuer}}/.well-known/openid-configuration"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Discovery is available\", () => pm.response.to.have.status(200));",
+              "const r=pm.response.json();",
+              "pm.test(\"Expected local issuer\",()=>pm.expect(r.issuer).to.eql(pm.collectionVariables.get(\"issuer\")));",
+              "pm.test(\"Token exchange is advertised\",()=>pm.expect(r.grant_types_supported).to.include(\"urn:ietf:params:oauth:grant-type:token-exchange\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Public signing keys",
+      "request": {
+        "method": "GET",
+        "url": "{{issuer}}/oauth2/jwks"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"JWKS available\",()=>pm.response.to.have.status(200));",
+              "pm.test(\"Public keys are present\",()=>pm.expect(pm.response.json().keys.length).to.be.above(0));",
+              "pm.test(\"No private RSA or EC key\",()=>pm.response.json().keys.forEach(k=>pm.expect(k).not.to.have.property(\"d\")));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Missing client credentials is rejected",
+      "request": {
+        "method": "POST",
+        "url": "{{issuer}}/oauth2/token",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "grant_type",
+              "value": "urn:ietf:params:oauth:grant-type:token-exchange"
+            },
+            {
+              "key": "subject_token",
+              "value": "not-a-token"
+            },
+            {
+              "key": "subject_token_type",
+              "value": "urn:ietf:params:oauth:token-type:id_token"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Unauthenticated exchange rejected\",()=>pm.expect(pm.response.code).to.be.oneOf([400,401]));",
+              "pm.test(\"No access token\",()=>pm.expect(pm.response.json()).not.to.have.property(\"access_token\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Exchange reference (advanced; use Android for the real demo)",
+      "request": {
+        "method": "POST",
+        "url": "{{issuer}}/oauth2/token",
+        "description": "Reference request only. Each proof must be fresh and signed by the original device key. The Android Keystore private key is deliberately non-exportable. The phone flow automates this request; do not paste production credentials into this collection.",
+        "header": [
+          {
+            "key": "DPoP",
+            "value": "{{fresh_dpop_proof}}"
+          }
+        ],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "grant_type",
+              "value": "urn:ietf:params:oauth:grant-type:token-exchange"
+            },
+            {
+              "key": "client_id",
+              "value": "{{child_client_id}}"
+            },
+            {
+              "key": "scope",
+              "value": "openid profile email"
+            },
+            {
+              "key": "subject_token_type",
+              "value": "urn:ietf:params:oauth:token-type:id_token"
+            },
+            {
+              "key": "subject_token",
+              "value": "{{parent_id_token}}"
+            },
+            {
+              "key": "actor_token_type",
+              "value": "urn:openid:params:token-type:device-secret"
+            },
+            {
+              "key": "actor_token",
+              "value": "{{device_secret}}"
+            },
+            {
+              "key": "client_assertion_type",
+              "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+            },
+            {
+              "key": "client_assertion",
+              "value": "{{fresh_client_assertion}}"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "if (!pm.variables.get(\"fresh_dpop_proof\")) { pm.execution.skipRequest(); }"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Child tokens issued\",()=>pm.response.to.have.status(200));",
+              "pm.test(\"DPoP bound\",()=>pm.expect(pm.response.json().token_type).to.eql(\"DPoP\"));",
+              "pm.test(\"No new device secret for child\",()=>pm.expect(pm.response.json()).not.to.have.property(\"device_secret\"));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,317 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package mgt
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+)
+
+type I18nHandlerTestSuite struct {
+	suite.Suite
+	mockService *I18nServiceInterfaceMock
+	handler     *i18nHandler
+}
+
+func TestI18nHandlerTestSuite(t *testing.T) {
+	suite.Run(t, new(I18nHandlerTestSuite))
+}
+
+func (suite *I18nHandlerTestSuite) SetupTest() {
+	suite.mockService = NewI18nServiceInterfaceMock(suite.T())
+	suite.handler = newI18nHandler(suite.mockService)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleListLanguages_Success() {
+	expectedLangs := []string{"en-US", "fr-FR"}
+	suite.mockService.On("ListLanguages", mock.Anything).Return(expectedLangs, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/i18n/languages", nil)
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleListLanguages(w, req)
+
+	suite.Equal(http.StatusOK, w.Code)
+
+	var response LanguageListResponse
+	err := json.NewDecoder(w.Body).Decode(&response)
+	suite.NoError(err)
+	suite.Len(response.Languages, 2)
+	suite.Contains(response.Languages, "en-US")
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleListLanguages_ServiceError() {
+	suite.mockService.On("ListLanguages", mock.Anything).Return(nil, &tidcommon.InternalServerError)
+
+	req := httptest.NewRequest(http.MethodGet, "/i18n/languages", nil)
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleListLanguages(w, req)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleResolveTranslationsByLanguage_Success() {
+	expectedResp := &providers.LanguageTranslationsResponse{
+		Language:     "en-US",
+		TotalResults: 10,
+		Translations: map[string]map[string]string{
+			"common": {"welcome": "Welcome"},
+		},
+	}
+	suite.mockService.On("ResolveTranslations", mock.Anything, "en-US", "common").
+		Return(expectedResp, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/i18n/languages/en-US/translations/resolve?namespace=common", nil)
+	req.SetPathValue("language", "en-US")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleResolveTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var response providers.LanguageTranslationsResponse
+	err := json.NewDecoder(w.Body).Decode(&response)
+	suite.NoError(err)
+	suite.Equal("en-US", response.Language)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleResolveTranslationsByLanguage_ServiceError() {
+	suite.mockService.On("ResolveTranslations", mock.Anything, "en-US", "").
+		Return(nil, &ErrorInvalidLanguage)
+
+	req := httptest.NewRequest(http.MethodGet, "/i18n/languages/en-US/translations/resolve", nil)
+	req.SetPathValue("language", "en-US") // Assuming no query params
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleResolveTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleSetOverrideTranslationsByLanguage_Success() {
+	inputTranslations := map[string]map[string]string{
+		"common": {"key": "value"},
+	}
+	request := SetTranslationsRequest{
+		Translations: inputTranslations,
+	}
+
+	expectedResp := &providers.LanguageTranslationsResponse{
+		Language:     "en-US",
+		TotalResults: 1,
+		Translations: inputTranslations,
+	}
+
+	suite.mockService.On("SetTranslationOverrides", mock.Anything, "en-US", inputTranslations).Return(expectedResp, nil)
+
+	body, _ := json.Marshal(request)
+	req := httptest.NewRequest(http.MethodPost, "/i18n/languages/en-US/translations", bytes.NewBuffer(body))
+	req.SetPathValue("language", "en-US")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleSetOverrideTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusOK, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleSetOverrideTranslationsByLanguage_InvalidJSON() {
+	req := httptest.NewRequest(http.MethodPost, "/i18n/languages/en-US/translations",
+		bytes.NewBufferString("invalid"))
+	req.SetPathValue("language", "en-US")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleSetOverrideTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleClearOverrideTranslationsByLanguage_Success() {
+	suite.mockService.On("ClearTranslationOverrides", mock.Anything, "en-US").Return(nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/i18n/languages/en-US/translations", nil)
+	req.SetPathValue("language", "en-US")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleClearOverrideTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusNoContent, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleResolveTranslation_Success() {
+	expectedResp := &TranslationResponse{
+		Language:  "en-US",
+		Namespace: "ns",
+		Key:       "key",
+		Value:     "val",
+	}
+	suite.mockService.On("ResolveTranslationsForKey", mock.Anything, "en-US", "ns", "key").Return(expectedResp, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/i18n/languages/en-US/translations/ns/ns/keys/key/resolve", nil)
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleResolveTranslation(w, req)
+
+	suite.Equal(http.StatusOK, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleSetOverrideTranslation_Success() {
+	request := SetTranslationRequest{Value: "new val"}
+	expectedResp := &TranslationResponse{
+		Language:  "en-US",
+		Namespace: "ns",
+		Key:       "key",
+		Value:     "new val",
+	}
+
+	suite.mockService.On("SetTranslationOverrideForKey", mock.Anything, "en-US", "ns", "key", "new val").
+		Return(expectedResp, nil)
+
+	body, _ := json.Marshal(request)
+	req := httptest.NewRequest(http.MethodPost, "/i18n/languages/en-US/translations/ns/ns/keys/key",
+		bytes.NewBuffer(body))
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleSetOverrideTranslation(w, req)
+
+	suite.Equal(http.StatusOK, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleClearOverrideTranslation_Success() {
+	suite.mockService.On("ClearTranslationOverrideForKey", mock.Anything, "en-US", "ns", "key").Return(nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/i18n/languages/en-US/translations/ns/ns/keys/key", nil)
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleClearOverrideTranslation(w, req)
+
+	suite.Equal(http.StatusNoContent, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleSetOverrideTranslationsByLanguage_ServiceError() {
+	inputTranslations := map[string]map[string]string{
+		"common": {"key": "value"},
+	}
+	request := SetTranslationsRequest{
+		Translations: inputTranslations,
+	}
+
+	suite.mockService.On("SetTranslationOverrides", mock.Anything, "en-US", inputTranslations).
+		Return(nil, &tidcommon.InternalServerError)
+
+	body, _ := json.Marshal(request)
+	req := httptest.NewRequest(http.MethodPost, "/i18n/languages/en-US/translations", bytes.NewBuffer(body))
+	req.SetPathValue("language", "en-US")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleSetOverrideTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleClearOverrideTranslationsByLanguage_ServiceError() {
+	suite.mockService.On("ClearTranslationOverrides", mock.Anything, "en-US").
+		Return(&ErrorInvalidLanguage)
+
+	req := httptest.NewRequest(http.MethodDelete, "/i18n/languages/en-US/translations", nil)
+	req.SetPathValue("language", "en-US")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleClearOverrideTranslationsByLanguage(w, req)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleResolveTranslation_ServiceError() {
+	suite.mockService.On("ResolveTranslationsForKey", mock.Anything, "en-US", "ns", "key").
+		Return(nil, &tidcommon.InternalServerError)
+
+	req := httptest.NewRequest(http.MethodGet, "/i18n/languages/en-US/translations/ns/ns/keys/key/resolve", nil)
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleResolveTranslation(w, req)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleSetOverrideTranslation_InvalidJSON() {
+	req := httptest.NewRequest(http.MethodPost, "/i18n/languages/en-US/translations/ns/ns/keys/key",
+		bytes.NewBufferString("invalid"))
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleSetOverrideTranslation(w, req)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleSetOverrideTranslation_ServiceError() {
+	request := SetTranslationRequest{Value: "new val"}
+
+	suite.mockService.On("SetTranslationOverrideForKey", mock.Anything, "en-US", "ns", "key", "new val").
+		Return(nil, &tidcommon.InternalServerError)
+
+	body, _ := json.Marshal(request)
+	req := httptest.NewRequest(http.MethodPost, "/i18n/languages/en-US/translations/ns/ns/keys/key",
+		bytes.NewBuffer(body))
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleSetOverrideTranslation(w, req)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleClearOverrideTranslation_ServiceError() {
+	suite.mockService.On("ClearTranslationOverrideForKey", mock.Anything, "en-US", "ns", "key").
+		Return(&ErrorInvalidLanguage)
+
+	req := httptest.NewRequest(http.MethodDelete, "/i18n/languages/en-US/translations/ns/ns/keys/key", nil)
+	req.SetPathValue("language", "en-US")
+	req.SetPathValue("namespace", "ns")
+	req.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+
+	suite.handler.HandleClearOverrideTranslation(w, req)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+}
+
+func (suite *I18nHandlerTestSuite) TestHandleError_NotFound() {
+	// Testing manual error construction/mapping in handleError
+	svcErr := &tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "I18N-1006", // Assuming this is TranslationNotFound
+	}
+
+	w := httptest.NewRecorder()
+	handleError(context.Background(), w, svcErr)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+}

@@ -1,0 +1,18 @@
+resource_type: server_config
+name: flow
+value:
+  authFlow:
+    defaultHandle: default-flow
+    expirySeconds: 3600
+  registrationFlow:
+    expirySeconds: 3600
+  recoveryFlow:
+    expirySeconds: 1800
+  signOutFlow:
+    defaultHandle: default-flow
+    expirySeconds: 1800
+  userOnboardingFlow:
+    defaultHandle: default-flow
+    expirySeconds: 86400
+  userDeletionFlow:
+    defaultHandle: default-user-deletion-flow

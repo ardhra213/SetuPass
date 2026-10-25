@@ -1,0 +1,363 @@
+{
+  "server": {
+    "hostname": "localhost",
+    "port": 8090,
+    "http_only": false,
+    "identifier": "default-deployment",
+    "security": {
+      "jwks_cache_ttl": 300,
+      "trusted_issuer": {
+        "issuer": "",
+        "jwks_url": "",
+        "audience": "",
+        "required_claims": []
+      },
+      "token_revocation": {
+        "enabled": true,
+        "source": "db",
+        "sync_interval_seconds": 60
+      },
+      "direct_auth_secret": ""
+    }
+  },
+  "gate_client": {
+    "path": "/gate"
+  },
+  "tls": {
+    "min_version": "1.3",
+    "cert_file": "config/certs/server.cert",
+    "key_file": "config/certs/server.key"
+  },
+  "database": {
+    "config": {
+      "type": "sqlite",
+      "sqlite": {
+        "path": "database/configdb.db",
+        "options": "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)",
+        "max_open_conns": 500,
+        "max_idle_conns": 100,
+        "conn_max_lifetime": 3600,
+        "max_retries": 3,
+        "min_retry_backoff_ms": 50,
+        "max_retry_backoff_ms": 2000
+      }
+    },
+    "runtime_transient": {
+      "type": "sqlite",
+      "sqlite": {
+        "path": "database/runtime_transient.db",
+        "options": "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)",
+        "max_open_conns": 500,
+        "max_idle_conns": 100,
+        "conn_max_lifetime": 3600,
+        "max_retries": 3,
+        "min_retry_backoff_ms": 50,
+        "max_retry_backoff_ms": 2000
+      },
+      "redis": {
+        "address": "",
+        "username": "",
+        "password": "",
+        "db": 0,
+        "key_prefix": "",
+        "max_retries": 5,
+        "min_retry_backoff_ms": 10,
+        "max_retry_backoff_ms": 100,
+        "dial_timeout_ms": 5000,
+        "read_timeout_ms": 3000,
+        "write_timeout_ms": 3000
+      }
+    },
+    "entity": {
+      "type": "sqlite",
+      "sqlite": {
+        "path": "database/entitydb.db",
+        "options": "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)",
+        "max_open_conns": 500,
+        "max_idle_conns": 100,
+        "conn_max_lifetime": 3600,
+        "max_retries": 3,
+        "min_retry_backoff_ms": 50,
+        "max_retry_backoff_ms": 2000
+      }
+    },
+    "runtime_persistent": {
+      "type": "sqlite",
+      "sqlite": {
+        "path": "database/runtime_persistent.db",
+        "options": "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)",
+        "max_open_conns": 500,
+        "max_idle_conns": 100,
+        "conn_max_lifetime": 3600,
+        "max_retries": 3,
+        "min_retry_backoff_ms": 50,
+        "max_retry_backoff_ms": 2000
+      }
+    }
+  },
+  "cache": {
+    "disabled": false,
+    "type": "inmemory",
+    "size": 1000,
+    "ttl": 3600,
+    "eviction_policy": "LRU",
+    "cleanup_interval": 300,
+    "properties": [],
+    "redis": {
+      "address": "",
+      "username": "",
+      "password": "",
+      "db": 0,
+      "key_prefix": "thunderid",
+      "max_retries": 5,
+      "min_retry_backoff_ms": 10,
+      "max_retry_backoff_ms": 100,
+      "dial_timeout_ms": 5000,
+      "read_timeout_ms": 3000,
+      "write_timeout_ms": 3000
+    }
+  },
+  "jwt": {
+    "validity_period": 3600,
+    "audience": "application",
+    "preferred_key_id": "default-key",
+    "leeway": 30
+  },
+  "oauth": {
+    "refresh_token": {
+      "renew_on_grant": true,
+      "revoke_previous_on_renew": true,
+      "validity_period": 86400
+    },
+    "authorization_code": {
+      "validity_period": 600
+    },
+    "authorization_request": {
+      "validity_period": 3600
+    },
+    "dcr": {
+      "enabled" : true,
+      "insecure": false
+    },
+    "par": {
+      "require_par": false,
+      "expires_in": 60
+    },
+    "dpop": {
+      "required": false,
+      "iat_window": 60,
+      "leeway": 5,
+      "allowed_algs": ["ES256", "PS256", "ES384", "ES512", "EdDSA", "RS256"],
+      "max_jti_length": 256
+    },
+    "allow_wildcard_redirect_uri": false,
+    "send_server_errors_to_client": false,
+    "allowed_auth_methods" :["client_secret_basic", "client_secret_post", "private_key_jwt", "none"],
+    "allowed_response_types" : ["code"],
+    "allowed_grant_types" : ["client_credentials", "authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:token-exchange", "urn:openid:params:grant-type:ciba", "urn:ietf:params:oauth:grant-type:jwt-bearer"],
+    "token_revocation" : {
+      "enabled" : true
+    },
+    "logout" : {
+      "enabled" : true
+    },
+    "revocation": {
+      "token_family": {
+        "on_refresh_replay": true,
+        "on_explicit_revoke": true,
+        "on_code_replay": true
+      }
+    },
+    "token_exchange": {
+      "token_family": "none"
+    }
+  },
+  "flow": {
+    "max_version_history": 10,
+    "auto_infer_registration": false,
+    "store": "composite"
+  },
+  "notification": {
+    "otp": {
+      "length": 6,
+      "use_numeric_only": true,
+      "validity_period_seconds": 120
+    }
+  },
+  "user": {
+    "indexed_attributes": ["username", "email", "mobile_number", "sub"],
+    "store": "composite"
+  },
+  "group": {
+    "store": "composite"
+  },
+  "declarative_resources": {
+    "enabled": false
+  },
+  "server_config": {
+    "store": "composite"
+  },
+  "log": {
+    "level": "info",
+    "output": {
+      "console": {
+        "enabled": true
+      },
+      "file": {
+        "enabled": false,
+        "path": "logs",
+        "file_name": "thunderid.log",
+        "format": "text",
+        "rotation": {
+          "size": {
+            "enabled": false,
+            "max_size_mb": 10
+          },
+          "time": {
+            "enabled": true,
+            "interval_days": 1
+          },
+          "max_backups": 20,
+          "max_age_days": 0,
+          "compress": false
+        }
+      }
+    },
+    "access": {
+      "exclude_paths": []
+    }
+  },
+  "observability": {
+    "enabled": false,
+    "output": {
+      "console": {
+        "enabled": false,
+        "format": "json",
+        "categories": ["observability.all"]
+      }
+    }
+  },
+  "crypto": {
+    "encryption": {
+      "key": "file://config/certs/crypto.key"
+    },
+    "password_hashing": {
+      "algorithm": "PBKDF2",
+      "argon2id": {
+        "iterations": 2,
+        "memory": 19456,
+        "parallelism": 1,
+        "key_size": 32,
+        "salt_size": 16
+      },
+      "pbkdf2": {
+        "iterations": 600000,
+        "key_size": 32,
+        "salt_size": 16
+      },
+      "sha256": {
+        "salt_size": 16
+      }
+    },
+    "keys": [
+      {
+        "id": "default-key",
+        "cert_file": "config/certs/signing.cert",
+        "key_file": "config/certs/signing.key"
+      },
+      {
+        "id": "ecdsa-key",
+        "cert_file": "config/certs/ecdsa-signing.cert",
+        "key_file": "config/certs/ecdsa-signing.key"
+      }
+    ]
+  },
+  "attribute_cache": {
+    "encryption": {
+      "enabled": false
+    }
+  },
+  "resource": {
+    "default_delimiter": ":",
+    "store": "composite"
+  },
+  "organization_unit": {
+    "store": "composite"
+  },
+  "identity_provider": {
+    "store": "composite"
+  },
+  "application": {
+    "store": "composite"
+  },
+  "agent": {
+    "store": "composite"
+  },
+  "user_type": {
+    "store": "composite"
+  },
+  "role": {
+    "store": "composite"
+  },
+  "theme": {
+    "store": "composite"
+  },
+  "layout": {
+    "store": "composite"
+  },
+  "translation": {
+    "store": "composite"
+  },
+  "authn_provider": {
+    "rest": {
+      "enabled": false,
+      "credential_types": [],
+      "base_url": "",
+      "timeout": 10,
+      "correlation_id_header": "X-Correlation-ID",
+      "security": {
+        "api_key": ""
+      }
+    }
+  },
+  "consent": {
+    "enabled": false,
+    "base_url": "",
+    "timeout": 5,
+    "max_retries": 3
+  },
+  "user_provider": {
+    "type": "default"
+  },
+  "openid4vp": {
+    "client_id_scheme": "x509_san_dns",
+    "signing_key_id": "ecdsa-key",
+    "ephemeral_key_id": "vp-enc",
+    "response_enc_values": [
+      "A128GCM",
+      "A256GCM",
+      "A128CBC-HS256",
+      "A256CBC-HS512"
+    ],
+    "request_validity_seconds": 300,
+    "state_ttl_seconds": 300,
+    "leeway_seconds": 30,
+    "key_binding_max_age_seconds": 300,
+    "result_token_validity_seconds": 300,
+    "enforce_key_binding": true,
+    "trusted_anchors": []
+  },
+  "openid4vci": {
+    "signing_key_id": "ecdsa-key",
+    "nonce_ttl_seconds": 300,
+    "proof_max_age_seconds": 300,
+    "credential_validity_seconds": 2592000,
+    "batch_size": 5,
+    "enforce_scope": false
+  },
+  "attestation": {
+    "apple": {
+      "root_certificate": "-----BEGIN CERTIFICATE-----\nMIICITCCAaegAwIBAgIQC/O+DvHN0uD7jG5yH2IXmDAKBggqhkjOPQQDAzBSMSYw\nJAYDVQQDDB1BcHBsZSBBcHAgQXR0ZXN0YXRpb24gUm9vdCBDQTETMBEGA1UECgwK\nQXBwbGUgSW5jLjETMBEGA1UECAwKQ2FsaWZvcm5pYTAeFw0yMDAzMTgxODMyNTNa\nFw00NTAzMTUwMDAwMDBaMFIxJjAkBgNVBAMMHUFwcGxlIEFwcCBBdHRlc3RhdGlv\nbiBSb290IENBMRMwEQYDVQQKDApBcHBsZSBJbmMuMRMwEQYDVQQIDApDYWxpZm9y\nbmlhMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAERTHhmLW07ATaFQIEVwTtT4dyctdh\nNbJhFs/Ii2FdCgAHGbpphY3+d8qjuDngIN3WVhQUBHAoMeQ/cLiP1sOUtgjqK9au\nYen1mMEvRq9Sk3Jm5X8U62H+xTD3FE9TgS41o0IwQDAPBgNVHRMBAf8EBTADAQH/\nMB0GA1UdDgQWBBSskRBTM72+aEH/pwyp5frq5eWKoTAOBgNVHQ8BAf8EBAMCAQYw\nCgYIKoZIzj0EAwMDaAAwZQIwQgFGnByvsiVbpTKwSga0kP0e8EeDS4+sQmTvb7vn\n53O5+FRXgeLhpJ06ysC5PrOyAjEAp5U4xDgEgllF7En3VcE3iexZZtKeYnpqtijV\noyFraWVIyd/dganmrduC1bmTBGwD\n-----END CERTIFICATE-----\n"
+    }
+  }
+}

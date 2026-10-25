@@ -1,0 +1,57 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package passkey
+
+import (
+	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+// webAuthnUser adapts generic model to implement the webauthn.User interface.
+type webAuthnUser struct {
+	id          []byte
+	name        string
+	displayName string
+	credentials []webauthnCredential
+}
+
+var _ webauthn.User = (*webAuthnUser)(nil)
+
+// WebAuthnID returns the user's ID as required by webauthn.User interface.
+func (u *webAuthnUser) WebAuthnID() []byte {
+	return u.id
+}
+
+// WebAuthnName returns the user's name as required by webauthn.User interface.
+func (u *webAuthnUser) WebAuthnName() string {
+	return u.name
+}
+
+// WebAuthnDisplayName returns the user's display name as required by webauthn.User interface.
+func (u *webAuthnUser) WebAuthnDisplayName() string {
+	return u.displayName
+}
+
+// WebAuthnCredentials returns the user's credentials as required by webauthn.User interface.
+func (u *webAuthnUser) WebAuthnCredentials() []webauthnCredential {
+	return u.credentials
+}
+
+// newWebAuthnUser creates a new WebAuthn user from raw identity fields.
+func newWebAuthnUser(entityID string, name, displayName string, credentials []webauthnCredential) *webAuthnUser {
+	return &webAuthnUser{
+		id:          []byte(entityID),
+		name:        name,
+		displayName: displayName,
+		credentials: credentials,
+	}
+}
+
+// newWebAuthnUserFromEntity creates a WebAuthn user from any entity, using its attributes
+// to derive the display name and username when available.
+func newWebAuthnUserFromEntity(e *providers.Entity, credentials []webauthnCredential) *webAuthnUser {
+	displayName, name := extractWebAuthnIdentity(e)
+	return newWebAuthnUser(e.ID, name, displayName, credentials)
+}

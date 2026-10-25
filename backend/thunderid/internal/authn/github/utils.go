@@ -1,0 +1,63 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package github
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	sysconst "github.com/thunder-id/thunderid/internal/system/constants"
+	syshttp "github.com/thunder-id/thunderid/internal/system/http"
+	"github.com/thunder-id/thunderid/internal/system/log"
+)
+
+// buildUserEmailRequest constructs the HTTP request to fetch user emails from GitHub.
+func buildUserEmailRequest(ctx context.Context, userEmailEndpoint string, accessToken string, logger *log.Logger) (
+	*http.Request, *tidcommon.ServiceError) {
+	req, err := http.NewRequest(http.MethodGet, userEmailEndpoint, nil)
+	if err != nil {
+		logger.Error(ctx, "Failed to create user email request", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	req.Header.Set(sysconst.AuthorizationHeaderName, sysconst.TokenTypeBearer+" "+accessToken)
+	req.Header.Set(sysconst.AcceptHeaderName, sysconst.ContentTypeJSON)
+
+	return req, nil
+}
+
+// sendUserEmailRequest sends the user email request to GitHub and processes the response.
+func sendUserEmailRequest(httpReq *http.Request, httpClient syshttp.HTTPClientInterface, logger *log.Logger) (
+	[]map[string]interface{}, *tidcommon.ServiceError) {
+	ctx := httpReq.Context()
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		logger.Error(ctx, "User email request to GitHub failed", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Error(ctx, "Failed to close user email response body", log.Error(closeErr))
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		logger.Error(ctx, "User email endpoint returned an error response",
+			log.Int("statusCode", resp.StatusCode), log.String("response", string(body)))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	var emails []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
+		logger.Error(ctx, "Failed to decode user email response", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	return emails, nil
+}

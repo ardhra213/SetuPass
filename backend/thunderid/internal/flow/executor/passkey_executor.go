@@ -1,0 +1,561 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	"github.com/thunder-id/thunderid/internal/authn/passkey"
+	"github.com/thunder-id/thunderid/internal/flow/core"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	systemutils "github.com/thunder-id/thunderid/internal/system/utils"
+)
+
+const (
+	passkeyExecutorModeChallenge = "challenge"
+	passkeyExecutorModeVerify    = "verify"
+	passkeyExecutorModeRegStart  = "register_start"
+	passkeyExecutorModeRegFinish = "register_finish"
+)
+
+// Passkey authentication input identifiers
+const (
+	// nolint:gosec // G101: This is a JSON field identifier, not a credential
+	inputCredentialID      = "credentialId"
+	inputClientDataJSON    = "clientDataJSON"
+	inputAuthenticatorData = "authenticatorData"
+	inputSignature         = "signature"
+	inputUserHandle        = "userHandle"
+)
+
+// Passkey registration input identifiers
+const (
+	inputAttestationObject = "attestationObject"
+)
+
+// Runtime data keys
+const (
+	runtimePasskeySessionToken    = "passkeySessionToken"
+	runtimePasskeyChallenge       = "passkeyChallenge"
+	runtimePasskeyCreationOptions = "passkeyCreationOptions"
+)
+
+// passkeyAuthExecutor implements the ExecutorInterface for passkey authentication.
+type passkeyAuthExecutor struct {
+	providers.Executor
+	authnProvider providers.AuthnProviderManager
+	logger        *log.Logger
+}
+
+var _ providers.Executor = (*passkeyAuthExecutor)(nil)
+
+// newPasskeyAuthExecutor creates a new instance of PasskeyAuthExecutor.
+func newPasskeyAuthExecutor(
+	flowFactory core.FlowFactoryInterface,
+	authnProvider providers.AuthnProviderManager,
+) *passkeyAuthExecutor {
+	defaultInputs := []providers.Input{
+		{
+			Identifier: inputCredentialID,
+			Type:       "string",
+			Required:   true,
+		},
+		{
+			Identifier: inputClientDataJSON,
+			Type:       "string",
+			Required:   true,
+		},
+		{
+			Identifier: inputAuthenticatorData,
+			Type:       "string",
+			Required:   true,
+		},
+		{
+			Identifier: inputSignature,
+			Type:       "string",
+			Required:   true,
+		},
+		{
+			Identifier: inputUserHandle,
+			Type:       "string",
+			Required:   false,
+		},
+	}
+
+	prerequisites := []providers.Input{
+		{
+			Identifier: userAttributeUserID,
+			Type:       "string",
+			Required:   false, // Optional to support usernameless flow
+		},
+	}
+
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "PasskeyAuthExecutor"),
+		log.String(log.LoggerKeyExecutorName, ExecutorNamePasskeyAuth))
+
+	base := flowFactory.CreateExecutor(ExecutorNamePasskeyAuth, providers.ExecutorTypeAuthentication,
+		defaultInputs, prerequisites, &providers.ExecutorMeta{
+			SupportedModes: []string{
+				passkeyExecutorModeChallenge,
+				passkeyExecutorModeVerify,
+				passkeyExecutorModeRegStart,
+				passkeyExecutorModeRegFinish,
+			},
+			SupportedProperties: []providers.ExecutorSupportedProperties{
+				{Property: "relyingPartyId", IsRequired: true, ApplicableModes: []string{
+					passkeyExecutorModeChallenge, passkeyExecutorModeRegStart,
+				}},
+				{Property: "relyingPartyName"},
+				{Property: "authenticatorSelection"},
+				{Property: "attestation"},
+			},
+		})
+
+	return &passkeyAuthExecutor{
+		Executor:      base,
+		authnProvider: authnProvider,
+		logger:        logger,
+	}
+}
+
+// Execute executes the passkey authentication logic.
+func (p *passkeyAuthExecutor) Execute(ctx *providers.NodeContext) (*providers.ExecutorResponse, error) {
+	logger := p.logger.With(log.String(log.LoggerKeyExecutionID, ctx.ExecutionID))
+	logger.Debug(ctx.Context, "Executing passkey authentication executor")
+
+	execResp := &providers.ExecutorResponse{
+		AdditionalData: make(map[string]string),
+		RuntimeData:    make(map[string]string),
+		AuthUser:       ctx.AuthUser,
+	}
+
+	if !p.ValidatePrerequisites(ctx, execResp, p.authnProvider) {
+		logger.Debug(ctx.Context, "Prerequisites not met for passkey authentication executor")
+		return execResp, nil
+	}
+
+	// Determine the executor mode
+	switch ctx.ExecutorMode {
+	case passkeyExecutorModeChallenge:
+		return p.executeChallenge(ctx, execResp)
+	case passkeyExecutorModeVerify:
+		return p.executeVerify(ctx, execResp)
+	case passkeyExecutorModeRegStart:
+		return p.executeRegisterStart(ctx, execResp)
+	case passkeyExecutorModeRegFinish:
+		return p.executeRegisterFinish(ctx, execResp)
+	default:
+		return execResp, fmt.Errorf("invalid executor mode: %s", ctx.ExecutorMode)
+	}
+}
+
+// executeChallenge generates and returns a passkey authentication challenge.
+func (p *passkeyAuthExecutor) executeChallenge(ctx *providers.NodeContext,
+	execResp *providers.ExecutorResponse) (*providers.ExecutorResponse, error) {
+	logger := p.logger.With(log.String(log.LoggerKeyExecutionID, ctx.ExecutionID))
+
+	// Get userID from context (may be empty for usernameless flow)
+	userID := p.GetUserIDFromContext(ctx, execResp, p.authnProvider)
+
+	if userID == "" {
+		logger.Debug(ctx.Context, "Generating usernameless passkey authentication challenge")
+	} else {
+		logger.Debug(ctx.Context, "Generating passkey authentication challenge",
+			log.MaskedString(log.LoggerKeyUserID, userID))
+	}
+
+	// Get relying party ID from node properties or use a default
+	relyingPartyID := p.getRelyingPartyID(ctx)
+	if relyingPartyID == "" {
+		logger.Error(ctx.Context, "Relying party ID not configured")
+		return execResp, errors.New("relying party ID is not configured in node properties")
+	}
+
+	// Start passkey authentication (service will detect usernameless flow if userID is empty)
+	startReq := &passkey.PasskeyAuthenticationStartRequest{
+		UserID:         userID, // May be empty for usernameless flow
+		RelyingPartyID: relyingPartyID,
+		AllowedOrigins: ctx.Application.PasskeyAllowedOrigins,
+	}
+	initResponse, svcErr := p.authnProvider.InitiateAuthentication(ctx.Context, passkey.CredentialType, startReq, nil)
+	if svcErr != nil {
+		if svcErr.Type == tidcommon.ClientErrorType {
+			logger.Debug(ctx.Context, "Failed to start passkey authentication",
+				log.MaskedString(log.LoggerKeyUserID, userID),
+				log.String("error", svcErr.ErrorDescription.DefaultValue))
+			execResp.Status = providers.ExecFailure
+			execResp.Error = tidcommon.CustomServiceError(ErrPasskeyAuthFailed, tidcommon.I18nMessage{
+				Key:          ErrPasskeyAuthFailed.ErrorDescription.Key,
+				DefaultValue: "Failed to start passkey authentication: " + svcErr.ErrorDescription.DefaultValue,
+			})
+			return execResp, nil
+		}
+		logger.Error(ctx.Context, "Failed to start passkey authentication",
+			log.MaskedString(log.LoggerKeyUserID, userID), log.Error(errors.New(svcErr.ErrorDescription.DefaultValue)))
+		return execResp, fmt.Errorf("failed to start passkey authentication: %s", svcErr.ErrorDescription.DefaultValue)
+	}
+	startData, ok := initResponse.(*passkey.PasskeyAuthenticationStartData)
+	if !ok {
+		logger.Error(ctx.Context, "Invalid response type from InitiateAuthentication",
+			log.MaskedString(log.LoggerKeyUserID, userID))
+		return execResp, errors.New("invalid response type from InitiateAuthentication")
+	}
+
+	// Store session token in runtime data for verification phase
+	execResp.RuntimeData[runtimePasskeySessionToken] = startData.SessionToken
+
+	// Marshal the challenge options to JSON
+	challengeJSON, err := json.Marshal(startData.PublicKeyCredentialRequestOptions)
+	if err != nil {
+		logger.Error(ctx.Context, "Failed to marshal challenge options", log.Error(err))
+		return execResp, fmt.Errorf("failed to marshal challenge options: %w", err)
+	}
+
+	// Return challenge data to client
+	execResp.AdditionalData[runtimePasskeyChallenge] = string(challengeJSON)
+	execResp.Status = providers.ExecComplete
+
+	if userID == "" {
+		logger.Debug(ctx.Context, "Usernameless passkey challenge generated successfully")
+	} else {
+		logger.Debug(ctx.Context, "Passkey challenge generated successfully",
+			log.MaskedString(log.LoggerKeyUserID, userID))
+	}
+	return execResp, nil
+}
+
+// executeVerify verifies the passkey authentication response.
+func (p *passkeyAuthExecutor) executeVerify(ctx *providers.NodeContext,
+	execResp *providers.ExecutorResponse) (*providers.ExecutorResponse, error) {
+	logger := p.logger.With(log.String(log.LoggerKeyExecutionID, ctx.ExecutionID))
+	logger.Debug(ctx.Context, "Verifying passkey authentication response")
+
+	// Check for required inputs
+	if !p.HasRequiredInputs(ctx, execResp) {
+		logger.Debug(ctx.Context, "Required inputs for passkey verification are not provided")
+		execResp.Status = providers.ExecUserInputRequired
+		return execResp, nil
+	}
+
+	// Validate the passkey
+	err := p.validatePasskey(ctx, execResp, logger)
+	if err != nil {
+		logger.Error(ctx.Context, "Error validating passkey", log.Error(err))
+		return execResp, fmt.Errorf("error validating passkey: %w", err)
+	}
+	if execResp.Status == providers.ExecFailure || execResp.Status == providers.ExecUserInputRequired {
+		return execResp, nil
+	}
+
+	execResp.Status = providers.ExecComplete
+	logger.Debug(ctx.Context, "Passkey verification completed successfully",
+		log.String("status", string(execResp.Status)),
+		log.Bool("isAuthenticated", execResp.AuthUser.IsAuthenticated()))
+
+	return execResp, nil
+}
+
+// validatePasskey validates the passkey authentication response.
+func (p *passkeyAuthExecutor) validatePasskey(ctx *providers.NodeContext, execResp *providers.ExecutorResponse,
+	logger *log.Logger) error {
+	userID := p.GetUserIDFromContext(ctx, execResp, p.authnProvider)
+
+	// Extract passkey response data from user inputs
+	credentialID := ctx.UserInputs[inputCredentialID]
+	clientDataJSON := ctx.UserInputs[inputClientDataJSON]
+	authenticatorData := ctx.UserInputs[inputAuthenticatorData]
+	signature := ctx.UserInputs[inputSignature]
+	userHandle := ctx.UserInputs[inputUserHandle]
+
+	logger.Debug(ctx.Context, "Validating passkey", log.MaskedString(log.LoggerKeyUserID, userID))
+
+	// Get session token from runtime data
+	sessionToken := ctx.RuntimeData[runtimePasskeySessionToken]
+	if sessionToken == "" {
+		logger.Error(ctx.Context, "No session token found for passkey authentication",
+			log.MaskedString(log.LoggerKeyUserID, userID))
+		return fmt.Errorf("no session token found for passkey authentication")
+	}
+
+	passkeyCredential := &passkey.PasskeyAuthenticationFinishRequest{
+		CredentialID:      credentialID,
+		CredentialType:    "public-key",
+		ClientDataJSON:    clientDataJSON,
+		AuthenticatorData: authenticatorData,
+		Signature:         signature,
+		UserHandle:        userHandle,
+		SessionToken:      sessionToken,
+		AllowedOrigins:    ctx.Application.PasskeyAllowedOrigins,
+	}
+	credentials := map[string]interface{}{passkey.CredentialType: passkeyCredential}
+	authUser, authenticatedClaims, svcErr := p.authnProvider.AuthenticateUser(
+		ctx.Context, nil, credentials, nil, nil, execResp.AuthUser)
+	execResp.AuthUser = authUser
+	if svcErr != nil {
+		if svcErr.Type == tidcommon.ClientErrorType {
+			logger.Debug(ctx.Context, "Passkey verification failed",
+				log.MaskedString(log.LoggerKeyUserID, userID),
+				log.String("error", svcErr.ErrorDescription.DefaultValue))
+			// Return USER_INPUT_REQUIRED to allow retry on invalid passkey
+			execResp.Status = providers.ExecUserInputRequired
+			execResp.Inputs = p.GetRequiredInputs(ctx)
+			execResp.Error = &ErrInvalidPasskey
+			return nil
+		}
+		logger.Error(ctx.Context, "Failed to verify passkey", log.MaskedString(log.LoggerKeyUserID, userID),
+			log.String("error", svcErr.ErrorDescription.DefaultValue))
+		return fmt.Errorf("failed to verify passkey: %s", svcErr.ErrorDescription.DefaultValue)
+	}
+	for key, value := range authenticatedClaims {
+		execResp.RuntimeData[key] = systemutils.ConvertInterfaceValueToString(value)
+	}
+
+	// Clear session token after successful verification
+	execResp.RuntimeData[runtimePasskeySessionToken] = ""
+
+	logger.Debug(ctx.Context, "Passkey validated successfully",
+		log.MaskedString(log.LoggerKeyUserID, userID))
+	return nil
+}
+
+// executeRegisterStart initiates passkey credential registration.
+func (p *passkeyAuthExecutor) executeRegisterStart(ctx *providers.NodeContext,
+	execResp *providers.ExecutorResponse) (*providers.ExecutorResponse, error) {
+	logger := p.logger.With(log.String(log.LoggerKeyExecutionID, ctx.ExecutionID))
+	logger.Debug(ctx.Context, "Starting passkey registration")
+
+	userID := p.GetUserIDFromContext(ctx, execResp, p.authnProvider)
+	if userID == "" {
+		execResp.Status = providers.ExecFailure
+		execResp.Error = &ErrUserIDRequiredForPasskeyReg
+		return execResp, nil
+	}
+
+	relyingPartyID := p.getRelyingPartyID(ctx)
+	if relyingPartyID == "" {
+		logger.Error(ctx.Context, "Relying party ID not configured")
+		return execResp, errors.New("relying party ID is not configured in node properties")
+	}
+
+	relyingPartyName := p.getRelyingPartyName(ctx)
+	if relyingPartyName == "" {
+		relyingPartyName = relyingPartyID // Default to ID if name not specified
+	}
+
+	// Build registration request
+	regReq := &passkey.PasskeyRegistrationStartRequest{
+		UserID:           userID,
+		RelyingPartyID:   relyingPartyID,
+		RelyingPartyName: relyingPartyName,
+		// Optional: Get authenticator selection and attestation from node properties
+		AuthenticatorSelection: p.getAuthenticatorSelection(ctx),
+		Attestation:            p.getAttestation(ctx),
+		AllowedOrigins:         ctx.Application.PasskeyAllowedOrigins,
+	}
+
+	// Start passkey registration
+	initResponse, svcErr := p.authnProvider.InitiateEnrollment(ctx.Context, passkey.CredentialType, regReq, nil)
+	if svcErr != nil {
+		if svcErr.Type == tidcommon.ClientErrorType {
+			logger.Debug(ctx.Context, "Failed to start passkey registration",
+				log.MaskedString(log.LoggerKeyUserID, userID),
+				log.String("error", svcErr.ErrorDescription.DefaultValue))
+			execResp.Status = providers.ExecFailure
+			execResp.Error = tidcommon.CustomServiceError(ErrPasskeyRegistrationFailed, tidcommon.I18nMessage{
+				Key:          ErrPasskeyRegistrationFailed.ErrorDescription.Key,
+				DefaultValue: "Failed to start passkey registration: " + svcErr.ErrorDescription.DefaultValue,
+			})
+			return execResp, nil
+		}
+		logger.Error(ctx.Context, "Failed to start passkey registration",
+			log.MaskedString(log.LoggerKeyUserID, userID), log.Error(errors.New(svcErr.ErrorDescription.DefaultValue)))
+		return execResp, fmt.Errorf("failed to start passkey registration: %s", svcErr.ErrorDescription.DefaultValue)
+	}
+	startData, ok := initResponse.(*passkey.PasskeyRegistrationStartData)
+	if !ok {
+		logger.Error(ctx.Context, "Invalid response type from InitiateEnrollment",
+			log.MaskedString(log.LoggerKeyUserID, userID))
+		return execResp, errors.New("invalid response type from InitiateEnrollment")
+	}
+
+	// Store session token in runtime data for finish phase
+	execResp.RuntimeData[runtimePasskeySessionToken] = startData.SessionToken
+
+	// Marshal the creation options to JSON
+	creationJSON, err := json.Marshal(startData.PublicKeyCredentialCreationOptions)
+	if err != nil {
+		logger.Error(ctx.Context, "Failed to marshal creation options", log.Error(err))
+		return execResp, fmt.Errorf("failed to marshal creation options: %w", err)
+	}
+
+	// Return creation options to client
+	execResp.AdditionalData[runtimePasskeyCreationOptions] = string(creationJSON)
+	execResp.Status = providers.ExecComplete
+
+	logger.Debug(ctx.Context, "Passkey registration options generated successfully",
+		log.MaskedString(log.LoggerKeyUserID, userID))
+	return execResp, nil
+}
+
+// executeRegisterFinish completes passkey credential registration.
+func (p *passkeyAuthExecutor) executeRegisterFinish(ctx *providers.NodeContext,
+	execResp *providers.ExecutorResponse) (*providers.ExecutorResponse, error) {
+	logger := p.logger.With(log.String(log.LoggerKeyExecutionID, ctx.ExecutionID))
+	logger.Debug(ctx.Context, "Finishing passkey registration")
+
+	// Check for required inputs
+	allInputs := []providers.Input{
+		{Identifier: inputCredentialID, Required: true},
+		{Identifier: inputClientDataJSON, Required: true},
+		{Identifier: inputAttestationObject, Required: true},
+	}
+
+	// Validate inputs - only block on missing REQUIRED inputs
+	missingRequiredInputs := false
+	for _, input := range allInputs {
+		if _, ok := ctx.UserInputs[input.Identifier]; !ok {
+			execResp.Inputs = append(execResp.Inputs, input)
+			if input.Required {
+				missingRequiredInputs = true
+			}
+		}
+	}
+
+	if missingRequiredInputs {
+		logger.Debug(ctx.Context, "Required inputs for passkey registration are not provided")
+		execResp.Status = providers.ExecUserInputRequired
+		execResp.Inputs = allInputs
+		return execResp, nil
+	}
+
+	// Extract registration response data from user inputs
+	credentialID := ctx.UserInputs[inputCredentialID]
+	clientDataJSON := ctx.UserInputs[inputClientDataJSON]
+	attestationObject := ctx.UserInputs[inputAttestationObject]
+
+	// Get session token from runtime data
+	sessionToken := ctx.RuntimeData[runtimePasskeySessionToken]
+	if sessionToken == "" {
+		logger.Error(ctx.Context, "No session token found for passkey registration")
+		return execResp, fmt.Errorf("no session token found for passkey registration")
+	}
+
+	// Build finish registration request
+	finishReq := &passkey.PasskeyRegistrationFinishRequest{
+		CredentialID:      credentialID,
+		CredentialType:    "public-key",
+		ClientDataJSON:    clientDataJSON,
+		AttestationObject: attestationObject,
+		SessionToken:      sessionToken,
+		AllowedOrigins:    ctx.Application.PasskeyAllowedOrigins,
+	}
+	credentials := map[string]interface{}{passkey.CredentialType: finishReq}
+	authUser, authenticatedClaims, svcErr := p.authnProvider.Enroll(
+		ctx.Context, nil, credentials, nil, nil, execResp.AuthUser)
+	execResp.AuthUser = authUser
+	if svcErr != nil {
+		if svcErr.Type == tidcommon.ClientErrorType {
+			logger.Debug(ctx.Context, "Passkey registration failed",
+				log.String("error", svcErr.ErrorDescription.DefaultValue))
+			// Return USER_INPUT_REQUIRED to allow retry on invalid registration
+			execResp.Status = providers.ExecUserInputRequired
+			execResp.Inputs = allInputs
+			execResp.Error = tidcommon.CustomServiceError(ErrPasskeyRegistrationFailed, tidcommon.I18nMessage{
+				Key:          ErrPasskeyRegistrationFailed.ErrorDescription.Key,
+				DefaultValue: "Failed to finish passkey registration: " + svcErr.ErrorDescription.DefaultValue,
+			})
+			return execResp, nil
+		}
+		logger.Error(ctx.Context, "Failed to finish passkey registration",
+			log.String("error", svcErr.ErrorDescription.DefaultValue))
+		return execResp, fmt.Errorf("failed to finish passkey registration: %s", svcErr.ErrorDescription.DefaultValue)
+	}
+	for key, value := range authenticatedClaims {
+		execResp.RuntimeData[key] = systemutils.ConvertInterfaceValueToString(value)
+	}
+
+	// Clear session token after successful registration
+	execResp.RuntimeData[runtimePasskeySessionToken] = ""
+
+	execResp.Status = providers.ExecComplete
+	logger.Debug(ctx.Context, "Passkey registration finished successfully",
+		log.MaskedString("credentialID", finishReq.CredentialID))
+	return execResp, nil
+}
+
+// getRelyingPartyID retrieves the relying party ID from node properties.
+func (p *passkeyAuthExecutor) getRelyingPartyID(ctx *providers.NodeContext) string {
+	if len(ctx.NodeProperties) == 0 {
+		return ""
+	}
+
+	if rpID, ok := ctx.NodeProperties["relyingPartyId"]; ok {
+		if rpIDStr, valid := rpID.(string); valid && rpIDStr != "" {
+			return rpIDStr
+		}
+	}
+
+	return ""
+}
+
+// getRelyingPartyName retrieves the relying party name from node properties.
+func (p *passkeyAuthExecutor) getRelyingPartyName(ctx *providers.NodeContext) string {
+	if len(ctx.NodeProperties) == 0 {
+		return ""
+	}
+
+	if rpName, ok := ctx.NodeProperties["relyingPartyName"]; ok {
+		if rpNameStr, valid := rpName.(string); valid && rpNameStr != "" {
+			return rpNameStr
+		}
+	}
+
+	return ""
+}
+
+// getAuthenticatorSelection retrieves authenticator selection criteria from node properties.
+func (p *passkeyAuthExecutor) getAuthenticatorSelection(ctx *providers.NodeContext) *passkey.AuthenticatorSelection {
+	if len(ctx.NodeProperties) == 0 {
+		return nil
+	}
+	if authSel, ok := ctx.NodeProperties["authenticatorSelection"]; ok {
+		if authSelMap, valid := authSel.(map[string]interface{}); valid {
+			selection := &passkey.AuthenticatorSelection{}
+			if authAttachment, ok := authSelMap["authenticatorAttachment"].(string); ok {
+				selection.AuthenticatorAttachment = authAttachment
+			}
+			if reqResidentKey, ok := authSelMap["requireResidentKey"].(bool); ok {
+				selection.RequireResidentKey = reqResidentKey
+			}
+			if residentKey, ok := authSelMap["residentKey"].(string); ok {
+				selection.ResidentKey = residentKey
+			}
+			if userVerification, ok := authSelMap["userVerification"].(string); ok {
+				selection.UserVerification = userVerification
+			}
+			return selection
+		}
+	}
+	return nil
+}
+
+// getAttestation retrieves attestation conveyance preference from node properties.
+func (p *passkeyAuthExecutor) getAttestation(ctx *providers.NodeContext) string {
+	if len(ctx.NodeProperties) == 0 {
+		return "none" // Default to "none"
+	}
+
+	if attestation, ok := ctx.NodeProperties["attestation"]; ok {
+		if attestationStr, valid := attestation.(string); valid && attestationStr != "" {
+			return attestationStr
+		}
+	}
+
+	return "none"
+}

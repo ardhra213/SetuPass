@@ -1,0 +1,73 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package group
+
+import (
+	"context"
+
+	oupkg "github.com/thunder-id/thunderid/internal/ou"
+	serverconst "github.com/thunder-id/thunderid/internal/system/constants"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+)
+
+// ouGroupResolverAdapter implements oupkg.OUGroupResolver using the group store.
+// This adapter allows the OU package to query group data without directly
+// accessing the GROUP table, breaking the cross-DB access boundary.
+type ouGroupResolverAdapter struct {
+	store groupStoreInterface
+}
+
+// newOUGroupResolver creates a new OUGroupResolver backed by the given group store.
+func newOUGroupResolver(store groupStoreInterface) oupkg.OUGroupResolver {
+	return &ouGroupResolverAdapter{store: store}
+}
+
+// GetGroupCountByOUID returns the count of groups belonging to the given organization unit.
+func (a *ouGroupResolverAdapter) GetGroupCountByOUID(ctx context.Context, ouID string) (int, error) {
+	return a.store.GetGroupsByOrganizationUnitCount(ctx, ouID)
+}
+
+// GetGroupListByOUID returns a paginated list of groups belonging to the given organization unit.
+func (a *ouGroupResolverAdapter) GetGroupListByOUID(
+	ctx context.Context, ouID string, limit, offset int,
+) ([]oupkg.Group, error) {
+	groups, err := a.store.GetGroupsByOrganizationUnit(ctx, ouID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]oupkg.Group, len(groups))
+	for i, g := range groups {
+		result[i] = oupkg.Group{ID: g.ID, Name: g.Name}
+	}
+
+	return result, nil
+}
+
+// GetResourceDependencies implements resourcedependency.Provider. It reports the groups that belong
+// to the given organization unit, which block the organization unit's deletion (a group cannot exist
+// without its organization unit). Only organization unit targets are handled; other resource types
+// have no group dependencies. The number of groups scanned is bounded by MaxCompositeStoreRecords.
+func (a *ouGroupResolverAdapter) GetResourceDependencies(
+	ctx context.Context, resourceType, id string) ([]resourcedependency.ResourceDependency, error) {
+	if resourceType != resourcedependency.ResourceTypeOU {
+		return []resourcedependency.ResourceDependency{}, nil
+	}
+
+	groups, err := a.GetGroupListByOUID(ctx, id, serverconst.MaxCompositeStoreRecords, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	deps := make([]resourcedependency.ResourceDependency, 0, len(groups))
+	for _, g := range groups {
+		deps = append(deps, resourcedependency.ResourceDependency{
+			ResourceType:     resourcedependency.ResourceTypeGroup,
+			ID:               g.ID,
+			DisplayName:      g.Name,
+			BehaviorOnDelete: resourcedependency.BehaviorRestrict,
+		})
+	}
+	return deps, nil
+}

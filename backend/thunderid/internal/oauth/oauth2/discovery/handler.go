@@ -1,0 +1,56 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package discovery
+
+import (
+	"net/http"
+
+	"github.com/thunder-id/thunderid/internal/system/error/apierror"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	sysutils "github.com/thunder-id/thunderid/internal/system/utils"
+)
+
+// DiscoveryHandlerInterface defines the interface for discovery handlers
+type discoveryHandlerInterface interface {
+	HandleOAuth2AuthorizationServerMetadata(w http.ResponseWriter, r *http.Request)
+	HandleOIDCDiscovery(w http.ResponseWriter, r *http.Request)
+}
+
+// discoveryHandler implements DiscoveryHandlerInterface
+type discoveryHandler struct {
+	discoveryService DiscoveryServiceInterface
+}
+
+// NewDiscoveryHandler creates a new discovery handler
+func newDiscoveryHandler(discoveryService DiscoveryServiceInterface) discoveryHandlerInterface {
+	return &discoveryHandler{
+		discoveryService: discoveryService,
+	}
+}
+
+// HandleOAuth2AuthorizationServerMetadata handles OAuth 2.0 Authorization Server Metadata requests
+func (dh *discoveryHandler) HandleOAuth2AuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "DiscoveryHandler"))
+
+	metadata := dh.discoveryService.GetOAuth2AuthorizationServerMetadata(ctx)
+
+	sysutils.WriteSuccessResponse(ctx, w, http.StatusOK, metadata)
+	logger.Debug(ctx, "OAuth 2.0 Authorization Server Metadata response sent successfully")
+}
+
+// HandleOIDCDiscovery handles OpenID Connect Discovery requests
+func (dh *discoveryHandler) HandleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "DiscoveryHandler"))
+
+	metadata, err := dh.discoveryService.GetOIDCMetadata(ctx)
+	if err != nil {
+		sysutils.WriteErrorResponse(ctx, w, http.StatusInternalServerError, apierror.ErrorResponse{})
+		return
+	}
+
+	sysutils.WriteSuccessResponse(ctx, w, http.StatusOK, metadata)
+	logger.Debug(ctx, "OIDC discovery response sent successfully")
+}

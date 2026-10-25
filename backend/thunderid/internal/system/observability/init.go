@@ -1,0 +1,54 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package observability
+
+import (
+	"context"
+
+	"github.com/thunder-id/thunderid/internal/system/log"
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+)
+
+// Initialize creates and initializes a new observability service instance.
+// This function follows the dependency injection pattern used throughout the server.
+// It reads configuration, initializes subscribers via the registry pattern,
+// and returns a ready-to-use observability service.
+//
+// The service can be nil-safe injected into other services - if observability is disabled,
+// the returned service will gracefully handle all operations as no-ops.
+//
+// Example usage:
+//
+//	observabilitySvc := observability.Initialize()
+//	flowExecSvc := flowexec.Initialize(mux, flowMgt, app, execRegistry, observabilitySvc)
+//
+// Returns:
+//   - ObservabilityServiceInterface: A new observability service instance
+func Initialize(config engineconfig.ObservabilityConfig) ObservabilityServiceInterface {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
+
+	// Service construction runs during application startup, outside any request.
+	ctx := context.Background()
+
+	logger.Debug(ctx, "Initializing observability service")
+
+	if !config.Enabled {
+		logger.Debug(ctx, "Observability is disabled in configuration")
+		// Return a disabled service (handles all operations as no-ops)
+		return &Service{
+			logger: logger,
+			config: config,
+		}
+	}
+
+	// Create the service with full initialization
+	svc := newServiceWithConfig(config)
+
+	// Log initialization status
+	activeSubscribers := svc.GetActiveSubscribers()
+	logger.Debug(ctx, "Observability service initialized successfully",
+		log.Int("activeSubscribers", len(activeSubscribers)))
+
+	return svc
+}

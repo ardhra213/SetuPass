@@ -1,0 +1,423 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package inboundclient
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/suite"
+
+	inboundmodel "github.com/thunder-id/thunderid/internal/inboundclient/model"
+	sysconfig "github.com/thunder-id/thunderid/internal/system/config"
+	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
+	"github.com/thunder-id/thunderid/internal/system/declarative_resource/entity"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+type FileBasedStoreTestSuite struct {
+	suite.Suite
+}
+
+func TestFileBasedStoreTestSuite(t *testing.T) {
+	suite.Run(t, new(FileBasedStoreTestSuite))
+}
+
+func (suite *FileBasedStoreTestSuite) SetupTest() {
+	sysconfig.ResetServerRuntime()
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", &sysconfig.Config{}))
+}
+
+func newFileBasedStoreForTest() *fileBasedStore {
+	return &fileBasedStore{
+		GenericFileBasedStore: declarativeresource.NewGenericFileBasedStoreForTest(entity.KeyTypeApplication),
+	}
+}
+
+func (suite *FileBasedStoreTestSuite) TestCreate_ValidInboundClient() {
+	store := newFileBasedStoreForTest()
+	client := &inboundmodel.InboundClient{ID: "app-1", AuthFlowID: "flow-1"}
+
+	err := store.Create("app-1", client)
+	suite.NoError(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestCreate_InvalidType() {
+	store := newFileBasedStoreForTest()
+
+	err := store.Create("app-1", "not-an-inbound-client")
+	suite.Error(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestCreateInboundClient_StoresAndRetrieves() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+	client := inboundmodel.InboundClient{ID: "app-1", AuthFlowID: "flow-1"}
+
+	err := store.CreateInboundClient(ctx, client)
+	suite.NoError(err)
+
+	got, err := store.GetInboundClientByEntityID(ctx, "app-1")
+	suite.NoError(err)
+	suite.Equal("app-1", got.ID)
+	suite.Equal("flow-1", got.AuthFlowID)
+}
+
+func (suite *FileBasedStoreTestSuite) TestCreateOAuthProfile_NotSupported() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	err := store.CreateOAuthProfile(ctx, "app-1", &providers.OAuthProfile{})
+	suite.Error(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetInboundClientByEntityID_NotFound() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	got, err := store.GetInboundClientByEntityID(ctx, "nonexistent")
+	suite.Nil(got)
+	suite.ErrorIs(err, ErrInboundClientNotFound)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_EmbeddedValueType() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	profileData := providers.OAuthProfile{
+		GrantTypes: []string{"authorization_code"},
+	}
+	client := inboundmodel.InboundClient{
+		ID: "app-2",
+		Properties: map[string]interface{}{
+			PropOAuthProfile: profileData,
+		},
+	}
+	suite.NoError(store.CreateInboundClient(ctx, client))
+
+	profile, err := store.GetOAuthProfileByEntityID(ctx, "app-2")
+	suite.NoError(err)
+	suite.NotNil(profile)
+	suite.Equal([]string{"authorization_code"}, profile.GrantTypes)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_EmbeddedPointerType() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	profileData := &providers.OAuthProfile{
+		GrantTypes: []string{"client_credentials"},
+	}
+	client := inboundmodel.InboundClient{
+		ID: "app-3",
+		Properties: map[string]interface{}{
+			PropOAuthProfile: profileData,
+		},
+	}
+	suite.NoError(store.CreateInboundClient(ctx, client))
+
+	profile, err := store.GetOAuthProfileByEntityID(ctx, "app-3")
+	suite.NoError(err)
+	suite.NotNil(profile)
+	suite.Equal([]string{"client_credentials"}, profile.GrantTypes)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_NilPointer() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	var nilProfile *providers.OAuthProfile
+	client := inboundmodel.InboundClient{
+		ID: "app-nil",
+		Properties: map[string]interface{}{
+			PropOAuthProfile: nilProfile,
+		},
+	}
+	suite.NoError(store.CreateInboundClient(ctx, client))
+
+	profile, err := store.GetOAuthProfileByEntityID(ctx, "app-nil")
+	suite.NoError(err)
+	suite.Nil(profile)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_NoProperties() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	client := inboundmodel.InboundClient{ID: "app-4"}
+	suite.NoError(store.CreateInboundClient(ctx, client))
+
+	profile, err := store.GetOAuthProfileByEntityID(ctx, "app-4")
+	suite.NoError(err)
+	suite.Nil(profile)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_KeyAbsent() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	client := inboundmodel.InboundClient{
+		ID:         "app-5",
+		Properties: map[string]interface{}{"other_key": "value"},
+	}
+	suite.NoError(store.CreateInboundClient(ctx, client))
+
+	profile, err := store.GetOAuthProfileByEntityID(ctx, "app-5")
+	suite.NoError(err)
+	suite.Nil(profile)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_InvalidType() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	client := inboundmodel.InboundClient{
+		ID: "app-bad",
+		Properties: map[string]interface{}{
+			PropOAuthProfile: 12345,
+		},
+	}
+	suite.NoError(store.CreateInboundClient(ctx, client))
+
+	profile, err := store.GetOAuthProfileByEntityID(ctx, "app-bad")
+	suite.Nil(profile)
+	suite.ErrorIs(err, ErrInboundClientDataCorrupted)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetOAuthProfileByEntityID_NotFound() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	_, err := store.GetOAuthProfileByEntityID(ctx, "missing")
+	suite.ErrorIs(err, ErrInboundClientNotFound)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetInboundClientList_Empty() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	list, err := store.GetInboundClientList(ctx, 0)
+	suite.NoError(err)
+	suite.Empty(list)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetInboundClientList_MultipleClients() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	for _, id := range []string{"c1", "c2", "c3"} {
+		suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: id}))
+	}
+
+	list, err := store.GetInboundClientList(ctx, 0)
+	suite.NoError(err)
+	suite.Len(list, 3)
+	for _, c := range list {
+		suite.True(c.IsReadOnly)
+	}
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetInboundClientList_RespectsLimit() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	for _, id := range []string{"c1", "c2", "c3"} {
+		suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: id}))
+	}
+
+	list, err := store.GetInboundClientList(ctx, 2)
+	suite.NoError(err)
+	suite.Len(list, 2)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetTotalInboundClientCount() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	count, err := store.GetTotalInboundClientCount(ctx)
+	suite.NoError(err)
+	suite.Equal(0, count)
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "c1"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "c2"}))
+
+	count, err = store.GetTotalInboundClientCount(ctx)
+	suite.NoError(err)
+	suite.Equal(2, count)
+}
+
+func (suite *FileBasedStoreTestSuite) TestUpdateInboundClient_NotSupported() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	err := store.UpdateInboundClient(ctx, inboundmodel.InboundClient{ID: "c1"})
+	suite.Error(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestUpdateOAuthProfile_NotSupported() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	err := store.UpdateOAuthProfile(ctx, "c1", &providers.OAuthProfile{})
+	suite.Error(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestDeleteInboundClient_NotSupported() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	err := store.DeleteInboundClient(ctx, "c1")
+	suite.Error(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestDeleteOAuthProfile_NotSupported() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	err := store.DeleteOAuthProfile(ctx, "c1")
+	suite.Error(err)
+}
+
+func (suite *FileBasedStoreTestSuite) TestInboundClientExists() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	exists, err := store.InboundClientExists(ctx, "c1")
+	suite.NoError(err)
+	suite.False(exists)
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "c1"}))
+
+	exists, err = store.InboundClientExists(ctx, "c1")
+	suite.NoError(err)
+	suite.True(exists)
+}
+
+func (suite *FileBasedStoreTestSuite) TestIsDeclarative() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.False(store.IsDeclarative(ctx, "c1"))
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "c1"}))
+
+	suite.True(store.IsDeclarative(ctx, "c1"))
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByThemeID_Empty() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.NoError(err)
+	suite.Equal(0, total)
+	suite.Empty(ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByThemeID_MatchesOnThemeID() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", ThemeID: "theme-a"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-2", ThemeID: "theme-b"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-3", ThemeID: "theme-a"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeTheme, "theme-a", 10, 0)
+	suite.NoError(err)
+	suite.Equal(2, total)
+	suite.ElementsMatch([]string{"app-1", "app-3"}, ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByReference_MatchesFlowAcrossSlots() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", AuthFlowID: "flow-x"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-2", RegistrationFlowID: "flow-x"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-3", RecoveryFlowID: "flow-x"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-4", AuthFlowID: "flow-y"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeFlow, "flow-x", 10, 0)
+	suite.NoError(err)
+	suite.Equal(3, total)
+	suite.ElementsMatch([]string{"app-1", "app-2", "app-3"}, ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByReference_UnknownTypeReturnsEmpty() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", ThemeID: "theme-a"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, "unknown", "theme-a", 10, 0)
+	suite.NoError(err)
+	suite.Equal(0, total)
+	suite.Empty(ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByThemeID_Pagination() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", ThemeID: "theme-a"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-2", ThemeID: "theme-a"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-3", ThemeID: "theme-a"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeTheme, "theme-a", 2, 1)
+	suite.NoError(err)
+	suite.Equal(3, total)
+	suite.Len(ids, 2)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByThemeID_OffsetBeyondTotal() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", ThemeID: "theme-a"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeTheme, "theme-a", 10, 5)
+	suite.NoError(err)
+	suite.Equal(1, total)
+	suite.Empty(ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByThemeID_ZeroLimit() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", ThemeID: "theme-a"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeTheme, "theme-a", 0, 0)
+	suite.NoError(err)
+	suite.Equal(1, total)
+	suite.Empty(ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByFlowID_MatchesAnyFlowSlot() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", AuthFlowID: "flow-x"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-2", RegistrationFlowID: "flow-x"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-3", RecoveryFlowID: "flow-x"}))
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-4", AuthFlowID: "flow-y"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, resourcedependency.ResourceTypeFlow, "flow-x", 10, 0)
+	suite.NoError(err)
+	suite.Equal(3, total)
+	suite.ElementsMatch([]string{"app-1", "app-2", "app-3"}, ids)
+}
+
+func (suite *FileBasedStoreTestSuite) TestGetEntityIDsByReference_UnknownType() {
+	store := newFileBasedStoreForTest()
+	ctx := context.Background()
+
+	suite.NoError(store.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "app-1", ThemeID: "theme-a"}))
+
+	ids, total, err := store.GetEntityIDsByReference(ctx, "layout", "layout-1", 10, 0)
+	suite.NoError(err)
+	suite.Equal(0, total)
+	suite.Empty(ids)
+}

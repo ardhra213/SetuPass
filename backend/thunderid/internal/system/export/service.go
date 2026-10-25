@@ -1,0 +1,452 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package export
+
+import (
+	"context"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
+	"github.com/thunder-id/thunderid/internal/system/log"
+)
+
+// templateVariablePattern matches only uppercase-only parameter names in the exact forms
+// "{{.NAME}}" and "{{- range .NAME}}". This relies on the parameterizer normalizing names
+// via toSnakeCase() (which calls strings.ToUpper()) and only emitting those two template
+// forms in parameterizer.go. Adding lowercase names or new actions like "if"/"with" will
+// require updating this regex.
+var templateVariablePattern = regexp.MustCompile(`\{\{\.([A-Z0-9_]+)\}\}|\{\{\-\s*range\s+\.([A-Z0-9_]+)\s*\}\}`)
+
+const (
+	formatYAML = "yaml"
+	formatJSON = "json"
+
+	resourceTypeApplication    = "application"
+	resourceTypeConnection     = "connection"
+	resourceTypeUserType       = "user_type"
+	resourceTypeAgentType      = "agent_type"
+	resourceTypeOU             = "organization_unit"
+	resourceTypeUser           = "user"
+	resourceTypeGroup          = "group"
+	resourceTypeResourceServer = "resource_server"
+	resourceTypeRole           = "role"
+	resourceTypeFlow           = "flow"
+	resourceTypeTranslation    = "translation"
+	resourceTypeLayout         = "layout"
+	resourceTypeTheme          = "theme"
+	resourceTypeAgent          = "agent"
+	resourceTypeServerConfig   = "server_config"
+)
+
+// parameterizerInterface defines the interface for template parameterization.
+type parameterizerInterface interface {
+	ToParameterizedYAML(ctx context.Context, obj interface{},
+		resourceType string, resourceName string,
+		rules *declarativeresource.ResourceRules) (string, map[string]string, error)
+	VarPrefix(resourceName string) string
+}
+
+// varNameAllocator hands out a unique template variable prefix per exported resource. Resource
+// names that normalize to the same prefix (for example "My-App", "My App" and "My_App", or an
+// application and a connection sharing a name) would otherwise share .env entries and silently
+// overwrite each other's values.
+type varNameAllocator struct {
+	parameterizer parameterizerInterface
+	taken         map[string]struct{}
+}
+
+func newVarNameAllocator(param parameterizerInterface) *varNameAllocator {
+	return &varNameAllocator{parameterizer: param, taken: make(map[string]struct{})}
+}
+
+// nameFor claims a variable prefix for the given resource name and returns the name to use for
+// variable naming, numerically suffixed when the prefix is already claimed by another resource.
+func (a *varNameAllocator) nameFor(resourceName string) string {
+	candidate := resourceName
+	for i := 2; ; i++ {
+		prefix := a.parameterizer.VarPrefix(candidate)
+		if _, claimed := a.taken[prefix]; !claimed {
+			a.taken[prefix] = struct{}{}
+			return candidate
+		}
+		candidate = resourceName + "_" + strconv.Itoa(i)
+	}
+}
+
+// ExportServiceInterface defines the interface for the export service.
+type ExportServiceInterface interface {
+	ExportResources(ctx context.Context, request *ExportRequest) (*ExportResponse, *tidcommon.ServiceError)
+}
+
+// exportService implements the ExportServiceInterface.
+type exportService struct {
+	parameterizer parameterizerInterface
+	registry      *resourceExporterRegistry
+}
+
+// newExportService creates a new instance of exportService.
+func newExportService(
+	exporters []declarativeresource.ResourceExporter, param parameterizerInterface,
+) ExportServiceInterface {
+	// Create registry and register all exporters
+	registry := newResourceExporterRegistry()
+	for _, exporter := range exporters {
+		registry.Register(exporter)
+	}
+
+	return &exportService{
+		parameterizer: param,
+		registry:      registry,
+	}
+}
+
+// ExportResources exports the specified resources as YAML files.
+func (es *exportService) ExportResources(
+	ctx context.Context, request *ExportRequest,
+) (*ExportResponse, *tidcommon.ServiceError) {
+	if request == nil {
+		return nil, tidcommon.CustomServiceError(ErrorInvalidRequest, tidcommon.I18nMessage{
+			Key:          "error.exportservice.nil_request_description",
+			DefaultValue: "Export request cannot be nil",
+		})
+	}
+
+	// Set default options if not provided
+	options := request.Options
+	if options == nil {
+		options = &ExportOptions{
+			Format: formatYAML,
+		}
+	}
+	if options.Format == "" {
+		options.Format = formatYAML
+	}
+
+	var exportFiles []ExportFile
+	var exportErrors []declarativeresource.ExportError
+	allVariables := make(map[string]string)
+	resourceCounts := make(map[string]int)
+	varNames := newVarNameAllocator(es.parameterizer)
+
+	// Map resource types to their IDs from the request
+	resourceMap := map[string][]string{
+		resourceTypeApplication:    request.Applications,
+		resourceTypeConnection:     request.Connections,
+		resourceTypeUserType:       request.UserTypes,
+		resourceTypeAgentType:      request.AgentTypes,
+		resourceTypeOU:             request.OrganizationUnits,
+		resourceTypeUser:           request.Users,
+		resourceTypeGroup:          request.Groups,
+		resourceTypeResourceServer: request.ResourceServers,
+		resourceTypeRole:           request.Roles,
+		resourceTypeFlow:           request.Flows,
+		resourceTypeTranslation:    request.Translations,
+		resourceTypeLayout:         request.Layouts,
+		resourceTypeTheme:          request.Themes,
+		resourceTypeAgent:          request.Agents,
+		resourceTypeServerConfig:   request.ServerConfigs,
+	}
+
+	// Export resources using the registry
+	resourceTypes := make([]string, 0, len(resourceMap))
+	for k := range resourceMap {
+		resourceTypes = append(resourceTypes, k)
+	}
+	sort.Strings(resourceTypes)
+
+	for _, resourceType := range resourceTypes {
+		resourceIDs := resourceMap[resourceType]
+		if len(resourceIDs) == 0 {
+			continue
+		}
+
+		exporter, exists := es.registry.Get(resourceType)
+		if !exists {
+			log.GetLogger().Warn(ctx, "No exporter registered for resource type",
+				log.String("resourceType", resourceType))
+			continue
+		}
+
+		files, vars, errors := es.exportResourcesWithExporter(ctx, exporter, resourceIDs, options, varNames)
+		exportFiles = append(exportFiles, files...)
+		for k, v := range vars {
+			allVariables[k] = v
+		}
+		exportErrors = append(exportErrors, errors...)
+		resourceCounts[resourceType] = len(files)
+	}
+
+	if len(exportFiles) == 0 {
+		return nil, tidcommon.CustomServiceError(ErrorNoResourcesFound, tidcommon.I18nMessage{
+			Key:          "error.exportservice.no_valid_resources_for_export_description",
+			DefaultValue: "No valid resources found for export",
+		})
+	}
+
+	// Calculate total size
+	var totalSize int64
+	for i := range exportFiles {
+		exportFiles[i].Size = int64(len(exportFiles[i].Content))
+		totalSize += exportFiles[i].Size
+	}
+
+	envFile := es.generateEnvFile(exportFiles, allVariables)
+
+	totalFilesCount := len(exportFiles)
+	if envFile != nil {
+		totalFilesCount++
+		totalSize += envFile.Size
+	}
+
+	summary := &ExportSummary{
+		TotalFiles:    totalFilesCount,
+		TotalSize:     totalSize,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339),
+		ResourceTypes: resourceCounts,
+		Errors:        exportErrors,
+	}
+
+	return &ExportResponse{
+		Files:   exportFiles,
+		EnvFile: envFile,
+		Summary: summary,
+	}, nil
+}
+
+// generateEnvFile extracts template variable names from exported files and builds a .env
+// payload, populating each entry with its original value where available.
+func (es *exportService) generateEnvFile(files []ExportFile, variables map[string]string) *EnvironmentFile {
+	variablesSet := make(map[string]struct{})
+
+	for _, file := range files {
+		matches := templateVariablePattern.FindAllStringSubmatch(file.Content, -1)
+		for _, match := range matches {
+			for i := 1; i < len(match); i++ {
+				if match[i] == "" {
+					continue
+				}
+				variablesSet[match[i]] = struct{}{}
+			}
+		}
+	}
+
+	if len(variablesSet) == 0 {
+		return nil
+	}
+
+	varNames := make([]string, 0, len(variablesSet))
+	for varName := range variablesSet {
+		varNames = append(varNames, varName)
+	}
+	sort.Strings(varNames)
+
+	var contentBuilder strings.Builder
+	for _, varName := range varNames {
+		contentBuilder.WriteString(varName)
+		contentBuilder.WriteString("=")
+		contentBuilder.WriteString(variables[varName])
+		contentBuilder.WriteString("\n")
+	}
+
+	content := contentBuilder.String()
+	return &EnvironmentFile{
+		FileName: ".env",
+		Content:  content,
+		Size:     int64(len(content)),
+	}
+}
+
+// exportResourcesWithExporter exports resources using a registered exporter.
+func (es *exportService) exportResourcesWithExporter(
+	ctx context.Context,
+	exporter declarativeresource.ResourceExporter,
+	resourceIDs []string,
+	options *ExportOptions,
+	varNames *varNameAllocator,
+) ([]ExportFile, map[string]string, []declarativeresource.ExportError) {
+	logger := log.GetLogger().With(log.String("component", "ExportService"))
+	resourceType := exporter.GetResourceType()
+	exportFiles := make([]ExportFile, 0, len(resourceIDs))
+	exportErrors := make([]declarativeresource.ExportError, 0, len(resourceIDs))
+	variableValues := make(map[string]string)
+	var resourceIDList []string
+	if len(resourceIDs) == 1 && resourceIDs[0] == "*" {
+		// Export all resources
+		ids, err := exporter.GetAllResourceIDs(ctx)
+		if err != nil {
+			logger.Warn(ctx, "Failed to get all resources",
+				log.String("resourceType", resourceType), log.Any("error", err))
+			return []ExportFile{}, variableValues, []declarativeresource.ExportError{}
+		}
+		resourceIDList = ids
+	} else {
+		resourceIDList = resourceIDs
+	}
+
+	for _, resourceID := range resourceIDList {
+		// Get the resource
+		resource, _, svcErr := exporter.GetResourceByID(ctx, resourceID)
+		if svcErr != nil {
+			logger.Warn(ctx, "Failed to get resource for export",
+				log.String("resourceType", resourceType),
+				log.String("resourceID", resourceID),
+				log.String("error", svcErr.Error.DefaultValue))
+			exportErrors = append(exportErrors, declarativeresource.ExportError{
+				ResourceType: resourceType,
+				ResourceID:   resourceID,
+				Error:        svcErr.Error.DefaultValue,
+				Code:         svcErr.Code,
+			})
+			continue
+		}
+
+		// Validate resource
+		validatedName, exportErr := exporter.ValidateResource(ctx, resource, resourceID, logger)
+		if exportErr != nil {
+			exportErrors = append(exportErrors, *exportErr)
+			continue
+		}
+
+		// Convert to export format based on options
+		var content string
+		var fileName string
+
+		if options.Format == formatJSON {
+			// Convert to JSON format (could be implemented later)
+			logger.Warn(ctx, "JSON format not yet implemented, falling back to YAML")
+			options.Format = formatYAML
+		}
+
+		templateContent, vars, err := es.generateTemplateFromStruct(ctx,
+			resource, exporter.GetParameterizerType(), varNames.nameFor(validatedName), exporter)
+		if err != nil {
+			logger.Warn(ctx, "Failed to generate template from struct",
+				log.String("resourceType", resourceType),
+				log.String("resourceID", resourceID),
+				log.String("error", err.Error()))
+			exportErrors = append(exportErrors, declarativeresource.ExportError{
+				ResourceType: resourceType,
+				ResourceID:   resourceID,
+				Error:        err.Error(),
+				Code:         "TemplateGenerationError",
+			})
+			continue
+		}
+		for k, v := range vars {
+			variableValues[k] = v
+		}
+		content = addResourceTypeField(templateContent, resourceType)
+
+		// Determine file name and folder path based on options
+		fileName = es.generateFileName(validatedName, resourceType, resourceID, options)
+		folderPath := es.generateFolderPath(resourceType, options)
+
+		// Create export file
+		exportFile := ExportFile{
+			FileName:     fileName,
+			Content:      content,
+			FolderPath:   folderPath,
+			ResourceType: resourceType,
+			ResourceID:   resourceID,
+		}
+		exportFiles = append(exportFiles, exportFile)
+	}
+
+	return exportFiles, variableValues, exportErrors
+}
+
+func (es *exportService) generateTemplateFromStruct(ctx context.Context, data interface{},
+	paramResourceType string, resourceName string,
+	exporter declarativeresource.ResourceExporter) (string, map[string]string, error) {
+	var rules *declarativeresource.ResourceRules
+	if pr, ok := exporter.(declarativeresource.PerResourceRuler); ok {
+		rules = pr.GetResourceRulesForResource(data)
+	} else {
+		rules = exporter.GetResourceRules()
+	}
+	template, vars, err := es.parameterizer.ToParameterizedYAML(ctx,
+		data, paramResourceType, resourceName, rules)
+	if err != nil {
+		return "", nil, err
+	}
+	return template, vars, nil
+}
+
+func addResourceTypeField(content, resourceType string) string {
+	fieldLine := "resource_type: " + resourceType
+	if strings.HasPrefix(content, fieldLine+"\n") || content == fieldLine {
+		return content
+	}
+	return fieldLine + "\n" + content
+}
+
+// sanitizeFileName sanitizes a filename by removing invalid characters.
+func sanitizeFileName(name string) string {
+	// Replace spaces with underscores and remove special characters
+	sanitized := strings.ReplaceAll(name, " ", "_")
+	// Remove any characters that are not alphanumeric, hyphens, or underscores
+	var result strings.Builder
+	for _, char := range sanitized {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' || char == '_' {
+			result.WriteRune(char)
+		}
+	}
+	sanitizedName := result.String()
+	if sanitizedName == "" {
+		sanitizedName = "resource"
+	}
+	return sanitizedName
+}
+
+// generateFileName generates a file name based on naming pattern and options.
+// nolint:unparam
+func (es *exportService) generateFileName(
+	resourceName, resourceType, resourceID string, options *ExportOptions) string {
+	// Get file extension based on format
+	ext := ".yaml"
+	if options.Format == "json" {
+		ext = ".json"
+	}
+
+	// Use custom naming pattern if provided
+	if options.FolderStructure != nil && options.FolderStructure.FileNamingPattern != "" {
+		pattern := options.FolderStructure.FileNamingPattern
+		pattern = strings.ReplaceAll(pattern, "${name}", sanitizeFileName(resourceName))
+		pattern = strings.ReplaceAll(pattern, "${type}", resourceType)
+		pattern = strings.ReplaceAll(pattern, "${id}", resourceID)
+		return pattern + ext
+	}
+
+	// Default naming: sanitized resource name
+	return sanitizeFileName(resourceName) + ext
+}
+
+// generateFolderPath generates the folder path for a resource based on options.
+// nolint:unparam
+func (es *exportService) generateFolderPath(resourceType string, options *ExportOptions) string {
+	if options.FolderStructure == nil {
+		return "" // No folder structure
+	}
+
+	// Check for custom structure first
+	if options.FolderStructure.CustomStructure != nil {
+		if customPath, exists := options.FolderStructure.CustomStructure[resourceType]; exists {
+			return customPath
+		}
+	}
+
+	// Group by type if enabled
+	if options.FolderStructure.GroupByType {
+		return resourceType + "s" // applications, groups, users, etc.
+	}
+
+	return ""
+}

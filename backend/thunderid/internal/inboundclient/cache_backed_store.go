@@ -1,0 +1,183 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Package inboundclient provides the inbound client persistence and service layer.
+package inboundclient
+
+import (
+	"context"
+
+	inboundmodel "github.com/thunder-id/thunderid/internal/inboundclient/model"
+	"github.com/thunder-id/thunderid/internal/system/cache"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+const (
+	inboundClientCacheName = "InboundClientByEntityIDCache"
+	oauthProfileCacheName  = "OAuthProfileByEntityIDCache"
+)
+
+// cachedBackStore wraps an inboundClientStoreInterface with an in-memory cache for
+// GetInboundClientByEntityID and GetOAuthProfileByEntityID. Writes invalidate/refresh cache
+// entries.
+type cachedBackStore struct {
+	inboundClientCache cache.CacheInterface[*inboundmodel.InboundClient]
+	oauthProfileCache  cache.CacheInterface[*providers.OAuthProfile]
+	inner              inboundClientStoreInterface
+}
+
+// newCachedBackStore wraps an existing inboundClientStoreInterface with caching.
+func newCachedBackStore(inner inboundClientStoreInterface,
+	inboundClientCache cache.CacheInterface[*inboundmodel.InboundClient],
+	oauthProfileCache cache.CacheInterface[*providers.OAuthProfile]) inboundClientStoreInterface {
+	return &cachedBackStore{
+		inboundClientCache: inboundClientCache,
+		oauthProfileCache:  oauthProfileCache,
+		inner:              inner,
+	}
+}
+
+func (c *cachedBackStore) CreateInboundClient(ctx context.Context, client inboundmodel.InboundClient) error {
+	if err := c.inner.CreateInboundClient(ctx, client); err != nil {
+		return err
+	}
+	c.cacheInboundClient(ctx, &client)
+	return nil
+}
+
+func (c *cachedBackStore) CreateOAuthProfile(ctx context.Context, entityID string,
+	oauthProfile *providers.OAuthProfile) error {
+	return c.inner.CreateOAuthProfile(ctx, entityID, oauthProfile)
+}
+
+func (c *cachedBackStore) GetInboundClientByEntityID(ctx context.Context, entityID string) (
+	*inboundmodel.InboundClient, error) {
+	key := cache.CacheKey{Key: entityID}
+	if cached, ok := c.inboundClientCache.Get(ctx, key); ok {
+		return cached, nil
+	}
+
+	client, err := c.inner.GetInboundClientByEntityID(ctx, entityID)
+	if err != nil || client == nil {
+		return client, err
+	}
+	c.cacheInboundClient(ctx, client)
+	return client, nil
+}
+
+func (c *cachedBackStore) GetOAuthProfileByEntityID(ctx context.Context, entityID string) (
+	*providers.OAuthProfile, error) {
+	key := cache.CacheKey{Key: entityID}
+	if cached, ok := c.oauthProfileCache.Get(ctx, key); ok {
+		return cached, nil
+	}
+
+	profile, err := c.inner.GetOAuthProfileByEntityID(ctx, entityID)
+	if err != nil || profile == nil {
+		return profile, err
+	}
+	c.cacheOAuthProfile(ctx, entityID, profile)
+	return profile, nil
+}
+
+func (c *cachedBackStore) GetInboundClientList(ctx context.Context, limit int) ([]inboundmodel.InboundClient, error) {
+	return c.inner.GetInboundClientList(ctx, limit)
+}
+
+func (c *cachedBackStore) GetTotalInboundClientCount(ctx context.Context) (int, error) {
+	return c.inner.GetTotalInboundClientCount(ctx)
+}
+
+func (c *cachedBackStore) UpdateInboundClient(ctx context.Context, client inboundmodel.InboundClient) error {
+	if err := c.inner.UpdateInboundClient(ctx, client); err != nil {
+		return err
+	}
+	c.invalidateInboundClient(ctx, client.ID)
+	c.cacheInboundClient(ctx, &client)
+	return nil
+}
+
+func (c *cachedBackStore) UpdateOAuthProfile(ctx context.Context, entityID string,
+	oauthProfile *providers.OAuthProfile) error {
+	if err := c.inner.UpdateOAuthProfile(ctx, entityID, oauthProfile); err != nil {
+		return err
+	}
+	c.invalidateOAuthProfile(ctx, entityID)
+	return nil
+}
+
+func (c *cachedBackStore) DeleteInboundClient(ctx context.Context, entityID string) error {
+	if err := c.inner.DeleteInboundClient(ctx, entityID); err != nil {
+		return err
+	}
+	c.invalidateInboundClient(ctx, entityID)
+	c.invalidateOAuthProfile(ctx, entityID)
+	return nil
+}
+
+func (c *cachedBackStore) DeleteOAuthProfile(ctx context.Context, entityID string) error {
+	if err := c.inner.DeleteOAuthProfile(ctx, entityID); err != nil {
+		return err
+	}
+	c.invalidateOAuthProfile(ctx, entityID)
+	return nil
+}
+
+func (c *cachedBackStore) InboundClientExists(ctx context.Context, entityID string) (bool, error) {
+	return c.inner.InboundClientExists(ctx, entityID)
+}
+
+func (c *cachedBackStore) IsDeclarative(ctx context.Context, entityID string) bool {
+	return c.inner.IsDeclarative(ctx, entityID)
+}
+
+func (c *cachedBackStore) GetEntityIDsByReference(
+	ctx context.Context, refType, refID string, limit, offset int) ([]string, int, error) {
+	return c.inner.GetEntityIDsByReference(ctx, refType, refID, limit, offset)
+}
+
+// --- Cache helpers ---
+
+func (c *cachedBackStore) cacheInboundClient(ctx context.Context, client *inboundmodel.InboundClient) {
+	if client == nil || client.ID == "" {
+		return
+	}
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "InboundClientCachedBackStore"))
+	if err := c.inboundClientCache.Set(ctx, cache.CacheKey{Key: client.ID}, client); err != nil {
+		logger.Error(ctx, "Failed to cache inbound client",
+			log.String("entityID", client.ID), log.Error(err))
+	}
+}
+
+func (c *cachedBackStore) cacheOAuthProfile(ctx context.Context, entityID string, profile *providers.OAuthProfile) {
+	if profile == nil || entityID == "" {
+		return
+	}
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "InboundClientCachedBackStore"))
+	if err := c.oauthProfileCache.Set(ctx, cache.CacheKey{Key: entityID}, profile); err != nil {
+		logger.Error(ctx, "Failed to cache OAuth profile", log.String("entityID", entityID), log.Error(err))
+	}
+}
+
+func (c *cachedBackStore) invalidateInboundClient(ctx context.Context, entityID string) {
+	if entityID == "" {
+		return
+	}
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "InboundClientCachedBackStore"))
+	if err := c.inboundClientCache.Delete(ctx, cache.CacheKey{Key: entityID}); err != nil {
+		logger.Error(ctx, "Failed to invalidate inbound client cache",
+			log.String("entityID", entityID), log.Error(err))
+	}
+}
+
+func (c *cachedBackStore) invalidateOAuthProfile(ctx context.Context, entityID string) {
+	if entityID == "" {
+		return
+	}
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "InboundClientCachedBackStore"))
+	if err := c.oauthProfileCache.Delete(ctx, cache.CacheKey{Key: entityID}); err != nil {
+		logger.Error(ctx, "Failed to invalidate OAuth profile cache",
+			log.String("entityID", entityID), log.Error(err))
+	}
+}

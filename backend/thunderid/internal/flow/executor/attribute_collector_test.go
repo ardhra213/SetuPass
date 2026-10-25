@@ -1,0 +1,532 @@
+// Copyright 2025-2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"encoding/json"
+	"testing"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/entityprovider"
+	"github.com/thunder-id/thunderid/tests/mocks/authnprovider/managermock"
+	"github.com/thunder-id/thunderid/tests/mocks/entityprovidermock"
+	"github.com/thunder-id/thunderid/tests/mocks/flow/coremock"
+)
+
+const testUserID = "user-123"
+
+type AttributeCollectorTestSuite struct {
+	suite.Suite
+	mockEntityProvider *entityprovidermock.EntityProviderInterfaceMock
+	mockFlowFactory    *coremock.FlowFactoryInterfaceMock
+	mockAuthnProvider  *managermock.AuthnProviderManagerMock
+	executor           *attributeCollector
+}
+
+func TestAttributeCollectorSuite(t *testing.T) {
+	suite.Run(t, new(AttributeCollectorTestSuite))
+}
+
+func (suite *AttributeCollectorTestSuite) SetupTest() {
+	suite.mockEntityProvider = entityprovidermock.NewEntityProviderInterfaceMock(suite.T())
+	suite.mockFlowFactory = coremock.NewFlowFactoryInterfaceMock(suite.T())
+	suite.mockAuthnProvider = managermock.NewAuthnProviderManagerMock(suite.T())
+
+	prerequisites := []providers.Input{{Identifier: "userID", Type: "string", Required: true}}
+	mockExec := createMockExecutorForAttrCollector(suite.T(), ExecutorNameAttributeCollect,
+		providers.ExecutorTypeUtility, prerequisites)
+
+	suite.mockFlowFactory.On("CreateExecutor", ExecutorNameAttributeCollect, providers.ExecutorTypeUtility,
+		[]providers.Input{}, prerequisites, mock.Anything).Return(mockExec)
+
+	suite.executor = newAttributeCollector(suite.mockFlowFactory, suite.mockEntityProvider,
+		suite.mockAuthnProvider)
+}
+
+// newAuthenticatedAuthUser creates an AuthUser that returns true for IsAuthenticated().
+func newAuthenticatedAuthUser() providers.AuthUser {
+	var authUser providers.AuthUser
+	_ = authUser.UnmarshalJSON([]byte(`{"default":{"entityReferenceToken":"tok","attributeToken":"tok"}}`))
+	return authUser
+}
+
+func createMockExecutorForAttrCollector(t *testing.T, name string,
+	executorType providers.ExecutorType, prerequisites []providers.Input) providers.Executor {
+	mockExec := coremock.NewExecutorInterfaceMock(t)
+	mockExec.On("GetName").Return(name).Maybe()
+	mockExec.On("GetType").Return(executorType).Maybe()
+	mockExec.On("GetDefaultInputs").Return([]providers.Input{}).Maybe()
+	mockExec.On("GetPrerequisites").Return(prerequisites).Maybe()
+	mockExec.On("GetInputs", mock.Anything).Return([]providers.Input{}).Maybe()
+	mockExec.On("ValidatePrerequisites", mock.Anything, mock.Anything, mock.Anything).
+		Return(func(ctx *providers.NodeContext, execResp *providers.ExecutorResponse,
+			_ providers.AuthnProviderManager) bool {
+			return ctx.RuntimeData != nil && ctx.RuntimeData[userAttributeUserID] != ""
+		}).Maybe()
+	mockExec.On("HasRequiredInputs", mock.Anything, mock.Anything).
+		Return(func(ctx *providers.NodeContext, execResp *providers.ExecutorResponse) bool {
+			if len(ctx.NodeInputs) == 0 {
+				return true
+			}
+			for _, input := range ctx.NodeInputs {
+				if _, ok := ctx.UserInputs[input.Identifier]; !ok {
+					if _, ok := ctx.RuntimeData[input.Identifier]; !ok {
+						execResp.Inputs = append(execResp.Inputs, input)
+					}
+				}
+			}
+			return len(execResp.Inputs) == 0
+		}).Maybe()
+	mockExec.On("GetUserIDFromContext", mock.Anything, mock.Anything, mock.Anything).
+		Return(func(ctx *providers.NodeContext, execResp *providers.ExecutorResponse,
+			_ providers.AuthnProviderManager) string {
+			if ctx.RuntimeData != nil {
+				return ctx.RuntimeData[userAttributeUserID]
+			}
+			return ""
+		}).Maybe()
+	return mockExec
+}
+
+func (suite *AttributeCollectorTestSuite) TestNewAttributeCollector() {
+	assert.NotNil(suite.T(), suite.executor)
+	assert.NotNil(suite.T(), suite.executor.entityProvider)
+}
+
+func (suite *AttributeCollectorTestSuite) TestExecute_RegistrationFlow() {
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeRegistration,
+	}
+
+	resp, err := suite.executor.Execute(ctx)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), resp)
+	assert.Equal(suite.T(), providers.ExecComplete, resp.Status)
+}
+
+func (suite *AttributeCollectorTestSuite) TestExecute_UserNotAuthenticated() {
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+	}
+
+	resp, err := suite.executor.Execute(ctx)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), resp)
+	assert.Equal(suite.T(), providers.ExecFailure, resp.Status)
+	assert.Equal(suite.T(), ErrUserNotAuthenticated.Error.DefaultValue, resp.Error.Error.DefaultValue)
+}
+
+func (suite *AttributeCollectorTestSuite) TestExecute_PrerequisitesNotMet() {
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+		AuthUser:    newAuthenticatedAuthUser(),
+		RuntimeData: map[string]string{},
+	}
+
+	resp, err := suite.executor.Execute(ctx)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), resp)
+	assert.Equal(suite.T(), providers.ExecFailure, resp.Status)
+}
+
+func (suite *AttributeCollectorTestSuite) TestExecute_UserInputRequired() {
+	attrs := map[string]interface{}{"phone": "1234567890"}
+	attrsJSON, _ := json.Marshal(attrs)
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		Attributes: attrsJSON,
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).Return(existingUser, nil)
+
+	authUser := newAuthenticatedAuthUser()
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+		AuthUser:    authUser,
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+		NodeInputs:  []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+		UserInputs:  map[string]string{},
+	}
+
+	suite.mockAuthnProvider.On("GetUserAttributes", mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything).Return(authUser,
+		(*providers.AttributesResponse)(nil), (*tidcommon.ServiceError)(nil)).Maybe()
+
+	resp, err := suite.executor.Execute(ctx)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), resp)
+	assert.Equal(suite.T(), providers.ExecUserInputRequired, resp.Status)
+	assert.NotEmpty(suite.T(), resp.Inputs)
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestExecute_Success() {
+	authUser := newAuthenticatedAuthUser()
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+		AuthUser:    authUser,
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+		NodeInputs:  []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+		UserInputs:  map[string]string{"email": "test@example.com"},
+	}
+
+	suite.mockAuthnProvider.On("GetUserAttributes", mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything).Return(authUser,
+		(*providers.AttributesResponse)(nil), (*tidcommon.ServiceError)(nil)).Maybe()
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		OUID:       "ou-123",
+		Type:       "INTERNAL",
+		Attributes: json.RawMessage(`{}`),
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).Return(existingUser, nil)
+	suite.mockEntityProvider.On("UpdateAttributes", testUserID, mock.MatchedBy(func(attrs json.RawMessage) bool {
+		return attrs != nil
+	})).Return(nil)
+
+	resp, err := suite.executor.Execute(ctx)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), resp)
+	assert.Equal(suite.T(), providers.ExecComplete, resp.Status)
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestExecute_UpdateUserFails() {
+	authUser := newAuthenticatedAuthUser()
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+		AuthUser:    authUser,
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+		NodeInputs:  []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+		UserInputs:  map[string]string{"email": "test@example.com"},
+	}
+
+	suite.mockAuthnProvider.On("GetUserAttributes", mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything).Return(authUser,
+		(*providers.AttributesResponse)(nil), (*tidcommon.ServiceError)(nil)).Maybe()
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		OUID:       "ou-123",
+		Type:       "INTERNAL",
+		Attributes: json.RawMessage(`{}`),
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).Return(existingUser, nil)
+	suite.mockEntityProvider.On("UpdateAttributes", testUserID, mock.Anything).
+		Return(&entityprovider.EntityProviderError{Message: "update failed"})
+
+	resp, err := suite.executor.Execute(ctx)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), resp)
+	assert.Equal(suite.T(), providers.ExecFailure, resp.Status)
+	assert.Contains(suite.T(), resp.Error.Error.DefaultValue, "Failed to update user attributes")
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestHasRequiredInputs_AttributesInAuthenticatedUser() {
+	authUser := newAuthenticatedAuthUser()
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+		AuthUser:    authUser,
+		NodeInputs:  []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+		RuntimeData: map[string]string{},
+	}
+
+	execResp := &providers.ExecutorResponse{
+		Inputs:      []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+		RuntimeData: make(map[string]string),
+		AuthUser:    authUser,
+	}
+
+	authnUserAttrs := &providers.AttributesResponse{
+		Attributes: map[string]*providers.AttributeResponse{
+			"email": {Value: "test@example.com"},
+		},
+	}
+	suite.mockAuthnProvider.On("GetUserAttributes", mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything).Return(authUser, authnUserAttrs, (*tidcommon.ServiceError)(nil))
+
+	result := suite.executor.HasRequiredInputs(ctx, execResp)
+
+	assert.True(suite.T(), result)
+	assert.Empty(suite.T(), execResp.Inputs)
+	assert.Equal(suite.T(), "test@example.com", execResp.RuntimeData["email"])
+}
+
+func (suite *AttributeCollectorTestSuite) TestHasRequiredInputs_AttributesInUserProfile() {
+	attrs := map[string]interface{}{"email": "profile@example.com"}
+	attrsJSON, _ := json.Marshal(attrs)
+
+	authUser := newAuthenticatedAuthUser()
+	ctx := &providers.NodeContext{
+		ExecutionID: "flow-123",
+		FlowType:    providers.FlowTypeAuthentication,
+		AuthUser:    authUser,
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+		NodeInputs:  []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+	}
+
+	execResp := &providers.ExecutorResponse{
+		Inputs:      []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+		RuntimeData: make(map[string]string),
+		AuthUser:    authUser,
+	}
+
+	// authnProvider returns no attributes, so it falls through to user profile lookup.
+	suite.mockAuthnProvider.On("GetUserAttributes", mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything).Return(authUser,
+		(*providers.AttributesResponse)(nil), (*tidcommon.ServiceError)(nil))
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		Attributes: attrsJSON,
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).Return(existingUser, nil)
+
+	result := suite.executor.HasRequiredInputs(ctx, execResp)
+
+	assert.True(suite.T(), result)
+	assert.Empty(suite.T(), execResp.Inputs)
+	assert.Equal(suite.T(), "profile@example.com", execResp.RuntimeData["email"])
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetUserAttributes_Success() {
+	attrs := map[string]interface{}{"email": "test@example.com", "phone": "1234567890"}
+	attrsJSON, _ := json.Marshal(attrs)
+
+	ctx := &providers.NodeContext{
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+	}
+
+	execResp := &providers.ExecutorResponse{
+		RuntimeData: make(map[string]string),
+	}
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		Attributes: attrsJSON,
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).Return(existingUser, nil)
+
+	result, err := suite.executor.getUserAttributes(ctx, execResp)
+
+	assert.NoError(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Equal(suite.T(), "test@example.com", result["email"])
+	assert.Equal(suite.T(), "1234567890", result["phone"])
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetUserAttributes_UserNotFound() {
+	ctx := &providers.NodeContext{
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+	}
+
+	execResp := &providers.ExecutorResponse{
+		RuntimeData: make(map[string]string),
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).
+		Return(nil, &entityprovider.EntityProviderError{Message: "user not found"})
+
+	result, err := suite.executor.getUserAttributes(ctx, execResp)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetUserAttributes_InvalidJSON() {
+	ctx := &providers.NodeContext{
+		RuntimeData: map[string]string{userAttributeUserID: testUserID},
+	}
+
+	execResp := &providers.ExecutorResponse{
+		RuntimeData: make(map[string]string),
+	}
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		Attributes: json.RawMessage(`invalid json`),
+	}
+
+	suite.mockEntityProvider.On("GetEntity", testUserID).Return(existingUser, nil)
+
+	result, err := suite.executor.getUserAttributes(ctx, execResp)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	suite.mockEntityProvider.AssertExpectations(suite.T())
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetUpdatedUserObject_NewAttributes() {
+	ctx := &providers.NodeContext{
+		UserInputs: map[string]string{"email": "new@example.com"},
+		NodeInputs: []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+	}
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		OUID:       "ou-123",
+		Type:       "INTERNAL",
+		Attributes: json.RawMessage(`{}`),
+	}
+
+	updateRequired, updatedUser, err := suite.executor.getUpdatedUserObject(ctx, existingUser)
+
+	assert.NoError(suite.T(), err)
+	assert.True(suite.T(), updateRequired)
+	assert.NotNil(suite.T(), updatedUser)
+	assert.Equal(suite.T(), testUserID, updatedUser.ID)
+
+	var attrs map[string]interface{}
+	err = json.Unmarshal(updatedUser.Attributes, &attrs)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), "new@example.com", attrs["email"])
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetUpdatedUserObject_NoNewAttributes() {
+	ctx := &providers.NodeContext{
+		UserInputs: map[string]string{},
+		NodeInputs: []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+	}
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		OUID:       "ou-123",
+		Type:       "INTERNAL",
+		Attributes: json.RawMessage(`{"existing": "value"}`),
+	}
+
+	updateRequired, updatedUser, err := suite.executor.getUpdatedUserObject(ctx, existingUser)
+
+	assert.NoError(suite.T(), err)
+	assert.False(suite.T(), updateRequired)
+	assert.Equal(suite.T(), existingUser, updatedUser)
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetUpdatedUserObject_MergeAttributes() {
+	existingAttrs := map[string]interface{}{"existing": "value"}
+	existingAttrsJSON, _ := json.Marshal(existingAttrs)
+
+	ctx := &providers.NodeContext{
+		UserInputs: map[string]string{"email": "new@example.com"},
+		NodeInputs: []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+	}
+
+	existingUser := &providers.Entity{
+		ID:         testUserID,
+		OUID:       "ou-123",
+		Type:       "INTERNAL",
+		Attributes: existingAttrsJSON,
+	}
+
+	updateRequired, updatedUser, err := suite.executor.getUpdatedUserObject(ctx, existingUser)
+
+	assert.NoError(suite.T(), err)
+	assert.True(suite.T(), updateRequired)
+	assert.NotNil(suite.T(), updatedUser)
+
+	var attrs map[string]interface{}
+	err = json.Unmarshal(updatedUser.Attributes, &attrs)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), "value", attrs["existing"])
+	assert.Equal(suite.T(), "new@example.com", attrs["email"])
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetInputAttributes_FromUserInput() {
+	ctx := &providers.NodeContext{
+		UserInputs:  map[string]string{"email": "test@example.com", "phone": "1234567890"},
+		RuntimeData: map[string]string{},
+		NodeInputs: []providers.Input{
+			{Identifier: "email", Type: "string", Required: true},
+			{Identifier: "phone", Type: "string", Required: true},
+		},
+	}
+
+	result := suite.executor.getInputAttributes(ctx)
+
+	assert.Len(suite.T(), result, 2)
+	assert.Equal(suite.T(), "test@example.com", result["email"])
+	assert.Equal(suite.T(), "1234567890", result["phone"])
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetInputAttributes_FromRuntimeData() {
+	ctx := &providers.NodeContext{
+		UserInputs:  map[string]string{},
+		RuntimeData: map[string]string{"email": "runtime@example.com"},
+		NodeInputs:  []providers.Input{{Identifier: "email", Type: "string", Required: true}},
+	}
+
+	result := suite.executor.getInputAttributes(ctx)
+
+	assert.Len(suite.T(), result, 1)
+	assert.Equal(suite.T(), "runtime@example.com", result["email"])
+}
+
+// TestGetInputAttributes_ConvertsByInputType verifies that values collected for typed inputs are
+// converted from the engine's string representation, so a boolean or number attribute satisfies
+// schema validation when the collected profile is persisted.
+func (suite *AttributeCollectorTestSuite) TestGetInputAttributes_ConvertsByInputType() {
+	ctx := &providers.NodeContext{
+		UserInputs:  map[string]string{"active": "true", "age": "42", "email": "test@example.com"},
+		RuntimeData: map[string]string{"verified": "false"},
+		NodeInputs: []providers.Input{
+			{Identifier: "active", Type: providers.InputTypeBoolean, Required: true},
+			{Identifier: "verified", Type: providers.InputTypeBoolean, Required: true},
+			{Identifier: "age", Type: providers.InputTypeNumber, Required: true},
+			{Identifier: "email", Type: providers.InputTypeText, Required: true},
+		},
+	}
+
+	result := suite.executor.getInputAttributes(ctx)
+
+	assert.Equal(suite.T(), true, result["active"])
+	assert.Equal(suite.T(), false, result["verified"])
+	assert.Equal(suite.T(), float64(42), result["age"])
+	assert.Equal(suite.T(), "test@example.com", result["email"])
+}
+
+func (suite *AttributeCollectorTestSuite) TestGetInputAttributes_SkipUserID() {
+	ctx := &providers.NodeContext{
+		UserInputs:  map[string]string{"userID": testUserID, "email": "test@example.com"},
+		RuntimeData: map[string]string{},
+		NodeInputs: []providers.Input{
+			{Identifier: "userID", Type: "string", Required: true},
+			{Identifier: "email", Type: "string", Required: true},
+		},
+	}
+
+	result := suite.executor.getInputAttributes(ctx)
+
+	assert.Len(suite.T(), result, 1)
+	assert.Equal(suite.T(), "test@example.com", result["email"])
+	assert.NotContains(suite.T(), result, "userID")
+}

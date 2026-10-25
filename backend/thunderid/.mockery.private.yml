@@ -1,0 +1,425 @@
+# Copyright 2025 The ThunderID Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Mockery configuration file for generating private mocks within the package
+template: testify
+template-data:
+  unroll-variadic: true
+packages:
+  github.com/thunder-id/thunderid/internal/system/cache:
+    config:
+      all: true
+      dir: internal/system/cache
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: cache
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/introspect:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/introspect
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: introspect
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/revocation:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/revocation
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: revocation
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/par:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/par
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: par
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/logout:
+    interfaces:
+      logoutRequestStoreInterface:
+        config:
+          dir: internal/oauth/oauth2/logout
+          structname: '{{.InterfaceName}}Mock'
+          pkgname: logout
+          filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/dpop
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: dpop
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/jti:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/jti
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: jti
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/authz:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/authz
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: authz
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/ciba:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/ciba
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: ciba
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/authn:
+    config:
+      all: true
+      dir: internal/authn
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: authn
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/authn/passkey:
+    config:
+      all: true
+      dir: internal/authn/passkey
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: passkey
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/idp:
+    config:
+      all: true
+      dir: internal/idp
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: idp
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/role:
+    config:
+      all: true
+      dir: internal/role
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: role
+      filename: "{{.InterfaceName}}_mock_test.go"
+  
+  github.com/thunder-id/thunderid/internal/flow/core:
+    config:
+      all: true
+      dir: internal/flow/core
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: core
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/flow/flowexec:
+    config:
+      all: true
+      dir: internal/flow/flowexec
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: flowexec
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/flow/session:
+    config:
+      all: true
+      dir: internal/flow/session
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: session
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/flow/mgt:
+    config:
+      all: true
+      dir: internal/flow/mgt
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: flowmgt
+      filename: "{{.InterfaceName}}_mock_test.go"
+  
+  github.com/thunder-id/thunderid/internal/flow/executor:
+    config:
+      all: true
+      dir: internal/flow/executor
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: executor
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/flow/flowmeta:
+    config:
+      all: true
+      dir: internal/flow/flowmeta
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: flowmeta
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/entity:
+    config:
+      all: true
+      dir: internal/entity
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: entity
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/user:
+    config:
+      all: true
+      dir: internal/user
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: user
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/entitytype:
+    config:
+      all: true
+      dir: internal/entitytype
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: entitytype
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/group:
+    config:
+      all: true
+      dir: internal/group
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: group
+      filename: "{{.InterfaceName}}_mock_test.go"
+  
+  github.com/thunder-id/thunderid/internal/notification:
+    config:
+      all: true
+      dir: internal/notification
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: notification
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/authn/openid4vp:
+    config:
+      all: true
+      dir: internal/authn/openid4vp
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: openid4vp
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/openid4vci:
+    config:
+      all: true
+      dir: internal/openid4vci
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: openid4vci
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/vc/presentation:
+    config:
+      all: true
+      dir: internal/vc/presentation
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: presentation
+      inpackage: true
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/vc/credential:
+    config:
+      all: true
+      dir: internal/vc/credential
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: credential
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/ou:
+    config:
+      all: true
+      dir: internal/ou
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: ou
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/system/security:
+    config:
+      all: true
+      dir: internal/system/security
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: security
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/design/theme/mgt:
+    config:
+      all: true
+      dir: internal/design/theme/mgt
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: thememgt
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/design/layout/mgt:
+    config:
+      all: true
+      dir: internal/design/layout/mgt
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: layoutmgt
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/design/resolve:
+    config:
+      all: true
+      dir: internal/design/resolve
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: resolve
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/userinfo:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/userinfo
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: userinfo
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/jwks:
+    config:
+      all: true
+      dir: internal/oauth/jwks
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: jwks
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/dcr:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/dcr
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: dcr
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/application:
+    config:
+      all: true
+      dir: internal/application
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: application
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/inboundclient:
+    config:
+      all: true
+      dir: internal/inboundclient
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: inboundclient
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/serverconfig:
+    config:
+      all: true
+      dir: internal/serverconfig
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: serverconfig
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/actorprovider:
+    config:
+      all: true
+      dir: internal/actorprovider
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: actorprovider
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/cert:
+    config:
+      all: true
+      dir: internal/cert
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: cert
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/resource:
+    config:
+      all: true
+      dir: internal/resource
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: resource
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/system/i18n/mgt:
+    config:
+      all: true
+      dir: internal/system/i18n/mgt
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: mgt
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/consent:
+    config:
+      all: true
+      dir: internal/consent
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: consent
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/attributecache:
+    config:
+      all: true
+      dir: internal/attributecache
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: attributecache
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/system/template:
+    config:
+      all: true
+      dir: internal/system/template
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: template
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/runtimestore/redisstore:
+    config:
+      all: true
+      dir: internal/runtimestore/redisstore
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: redisstore
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/pkg/thunderidengine/providers:
+    interfaces:
+      FlowProvider:
+        config:
+          dir: internal/flow/flowexec
+          structname: '{{.InterfaceName}}Mock'
+          pkgname: flowexec
+          filename: "{{.InterfaceName}}_mock_test.go"
+      Executor:
+        config:
+          dir: internal/flow/core
+          structname: ExecutorInterfaceMock
+          pkgname: core
+          filename: "ExecutorInterface_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/flow/graphbuilder:
+    interfaces:
+      GraphBuilderInterface:
+        config:
+          dir: internal/flow/flowexec
+          structname: '{{.InterfaceName}}Mock'
+          pkgname: flowexec
+          filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/attestation:
+    config:
+      all: true
+      dir: internal/attestation
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: attestation
+      filename: "{{.InterfaceName}}_mock_test.go"
+
+  github.com/thunder-id/thunderid/internal/system/resourcedependency:
+    config:
+      all: true
+      dir: internal/system/resourcedependency
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: resourcedependency
+      filename: "{{.InterfaceName}}_mock_test.go"

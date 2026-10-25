@@ -1,0 +1,7 @@
+PARSE OK: Check.ps1
+PARSE OK: Common.ps1
+PARSE OK: Install-Apps.ps1
+PARSE OK: Pair-Apps.ps1
+PARSE OK: Start.ps1
+PARSE OK: Update-Backend.ps1
+Docker argument forwarding passed, including paths with spaces.

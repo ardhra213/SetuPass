@@ -1,0 +1,1391 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package idp
+
+import (
+	"context"
+	"testing"
+
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/cmodels"
+	"github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/internal/system/log"
+)
+
+type IDPUtilsTestSuite struct {
+	suite.Suite
+	logger *log.Logger
+}
+
+func TestIDPUtilsTestSuite(t *testing.T) {
+	suite.Run(t, new(IDPUtilsTestSuite))
+}
+
+func (s *IDPUtilsTestSuite) SetupTest() {
+	s.logger = log.GetLogger()
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OAuth_AllRequired() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropUserInfoEndpoint, "http://idp/userinfo", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+	s.Len(result, 6)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OAuth_WithOptional() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropUserInfoEndpoint, "http://idp/userinfo", false)
+	prop7, _ := cmodels.NewProperty(PropScopes, "profile,email", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6, *prop7}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+	s.Len(result, 7)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OAuth_WithoutUserInfoEndpoint() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+	s.Len(result, 5)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OAuth_MissingRequired() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+
+	properties := []cmodels.Property{*prop1, *prop2}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.DefaultValue, "missing")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OIDC_AllRequired() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+	s.GreaterOrEqual(len(result), 6)
+
+	hasOpenIDScope := false
+	for _, prop := range result {
+		if prop.GetName() == PropScopes {
+			value, _ := prop.GetValue()
+			s.Contains(value, "openid")
+			hasOpenIDScope = true
+		}
+	}
+	s.True(hasOpenIDScope, "OIDC should have openid scope added")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OIDC_WithExistingScopes() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropScopes, "profile,email", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+
+	for _, prop := range result {
+		if prop.GetName() == PropScopes {
+			value, _ := prop.GetValue()
+			s.Contains(value, "openid")
+			s.Contains(value, "profile")
+			s.Contains(value, "email")
+		}
+	}
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OIDC_ScopesAlreadyHasOpenID() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropScopes, "openid,profile,email", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+
+	for _, prop := range result {
+		if prop.GetName() == PropScopes {
+			value, _ := prop.GetValue()
+			s.Contains(value, "openid")
+		}
+	}
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_Google_WithDefaults() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGoogle, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+	s.GreaterOrEqual(len(result), 7)
+
+	foundProperties := make(map[string]string)
+	for _, prop := range result {
+		value, _ := prop.GetValue()
+		foundProperties[prop.GetName()] = value
+	}
+
+	s.Equal(googleAuthorizationEndpoint, foundProperties[PropAuthorizationEndpoint])
+	s.Equal(googleTokenEndpoint, foundProperties[PropTokenEndpoint])
+	s.Equal(googleUserInfoEndpoint, foundProperties[PropUserInfoEndpoint])
+	s.Equal(googleJwksEndpoint, foundProperties[PropJwksEndpoint])
+	s.Equal("openid,email,profile", foundProperties[PropScopes])
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_Google_WithCustomEndpoints() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://custom/auth", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGoogle, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+
+	foundProperties := make(map[string]string)
+	for _, prop := range result {
+		value, _ := prop.GetValue()
+		foundProperties[prop.GetName()] = value
+	}
+
+	s.Equal("http://custom/auth", foundProperties[PropAuthorizationEndpoint])
+	s.Equal(googleTokenEndpoint, foundProperties[PropTokenEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_WithDefaults() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+	s.GreaterOrEqual(len(result), 6)
+
+	foundProperties := make(map[string]string)
+	for _, prop := range result {
+		value, _ := prop.GetValue()
+		foundProperties[prop.GetName()] = value
+	}
+
+	s.Equal(gitHubAuthorizationEndpoint, foundProperties[PropAuthorizationEndpoint])
+	s.Equal(gitHubTokenEndpoint, foundProperties[PropTokenEndpoint])
+	s.Equal(gitHubUserInfoEndpoint, foundProperties[PropUserInfoEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_WithCustomEndpoints() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropTokenEndpoint, "http://custom/token", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+
+	foundProperties := make(map[string]string)
+	for _, prop := range result {
+		value, _ := prop.GetValue()
+		foundProperties[prop.GetName()] = value
+	}
+
+	s.Equal("http://custom/token", foundProperties[PropTokenEndpoint])
+	s.Equal(gitHubAuthorizationEndpoint, foundProperties[PropAuthorizationEndpoint])
+}
+
+// GitHub returns no email at all without an email scope, so a connection created without scopes gets one.
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_DefaultsScopes() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.Nil(err)
+	s.Equal(defaultGitHubScopes, GetPropertyValue(result, PropScopes))
+}
+
+// A deliberately narrow scope list is a choice, not an omission, even when it cannot yield an email.
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_PreservesExplicitScopes() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropScopes, "read:user", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.Nil(err)
+	s.Equal("read:user", GetPropertyValue(result, PropScopes))
+}
+
+// An explicitly empty scope string is rejected by the generic empty-value check that applies to every
+// property, so it never reaches scope defaulting.
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_EmptyScopesRejected() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropScopes, "", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+}
+
+// A scope value that survives the empty-value check but parses to no scopes still defaults.
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_BlankScopeListDefaults() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropScopes, ",", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.Nil(err)
+	s.Equal(defaultGitHubScopes, GetPropertyValue(result, PropScopes))
+}
+
+// An empty value reaches the defaulting step as a present-but-blank property, not a missing one.
+func (s *IDPUtilsTestSuite) TestEnsureGitHubScopes_EmptyScopesValue() {
+	prop, _ := cmodels.NewProperty(PropScopes, "", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureDefaultGitHubScopes(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Equal(defaultGitHubScopes, value)
+}
+
+// The property is created, not just populated, when the connection omits scopes entirely.
+func (s *IDPUtilsTestSuite) TestEnsureGitHubScopes_NoExistingScopes() {
+	propertyMap := map[string]cmodels.Property{}
+
+	err := ensureDefaultGitHubScopes(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Equal(defaultGitHubScopes, value)
+}
+
+// The scope default must not travel through resolveEndpointDefaults: that rewrites each value's
+// scheme and host, and "user:email" parses as a URL with scheme "user", so a base URL override would
+// corrupt it.
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_GitHub_ScopesSurviveBaseURLOverride() {
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime("/tmp/test", &config.Config{
+		IdentityProvider: config.IdentityProviderConfig{
+			GitHubBaseURL: "http://localhost:8092",
+		},
+	})
+	defer config.ResetServerRuntime()
+
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGitHub, properties, s.logger)
+
+	s.Nil(err)
+	s.Equal(defaultGitHubScopes, GetPropertyValue(result, PropScopes))
+	s.Contains(GetPropertyValue(result, PropAuthorizationEndpoint), "localhost:8092")
+}
+
+// Generic OAuth has no known email scope to guess, so it keeps no scopes rather than inheriting one.
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OAuth_NoScopeDefault() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropUserInfoEndpoint, "http://idp/userinfo", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.Nil(err)
+	s.Empty(GetPropertyValue(result, PropScopes))
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_EmptyPropertyName() {
+	prop1, _ := cmodels.NewProperty("", "test-value", false)
+
+	properties := []cmodels.Property{*prop1}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "property names cannot be empty")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_EmptyPropertyValue() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "", false)
+
+	properties := []cmodels.Property{*prop1}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "value cannot be empty")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_UnsupportedProperty() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty("unsupported_prop", "value", false)
+
+	properties := []cmodels.Property{*prop1, *prop2}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorUnsupportedIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.String(), "unsupported_prop")
+	s.Contains(err.ErrorDescription.DefaultValue, "not supported")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_InvalidIDPType() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+
+	properties := []cmodels.Property{*prop1}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPType("INVALID"), properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(tidcommon.InternalServerError.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestPropertyMapToSlice() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+
+	propertyMap := map[string]cmodels.Property{
+		PropClientID:     *prop1,
+		PropClientSecret: *prop2,
+	}
+
+	result := propertyMapToSlice(propertyMap)
+
+	s.NotNil(result)
+	s.Len(result, 2)
+
+	names := make([]string, 0)
+	for _, prop := range result {
+		names = append(names, prop.GetName())
+	}
+	s.Contains(names, PropClientID)
+	s.Contains(names, PropClientSecret)
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_NoExistingScopes() {
+	propertyMap := make(map[string]cmodels.Property)
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+	s.Contains(propertyMap, PropScopes)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Equal("openid,email,profile", value)
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_WithExistingScopes() {
+	prop, _ := cmodels.NewProperty(PropScopes, "profile,email", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Contains(value, "openid")
+	s.Contains(value, "profile")
+	s.Contains(value, "email")
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_AlreadyHasOpenID() {
+	prop, _ := cmodels.NewProperty(PropScopes, "openid,profile", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Contains(value, "openid")
+	s.Contains(value, "profile")
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_EmptyScopesValue() {
+	prop, _ := cmodels.NewProperty(PropScopes, "", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Equal("openid,email,profile", value)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_ValidOAuth() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropUserInfoEndpoint, "http://idp/userinfo", false)
+
+	idp := &providers.IDPDTO{
+		Name:       "Test OAuth IDP",
+		Type:       providers.IDPTypeOAuth,
+		Properties: []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6},
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.Nil(err)
+	s.NotNil(idp.Properties)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_NilIDP() {
+	err := validateIDP(context.Background(), nil, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorIDPNil.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_EmptyName() {
+	idp := &providers.IDPDTO{
+		Name: "",
+		Type: providers.IDPTypeOAuth,
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPName.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_EmptyType() {
+	idp := &providers.IDPDTO{
+		Name: "Test IDP",
+		Type: "",
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPType.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_InvalidType() {
+	idp := &providers.IDPDTO{
+		Name: "Test IDP",
+		Type: "INVALID",
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPType.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_WithWhitespaceName() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "test-client", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "test-secret", false)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "http://localhost/callback", false)
+	prop4, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "http://idp/auth", false)
+	prop5, _ := cmodels.NewProperty(PropTokenEndpoint, "http://idp/token", false)
+	prop6, _ := cmodels.NewProperty(PropUserInfoEndpoint, "http://idp/userinfo", false)
+
+	idp := &providers.IDPDTO{
+		Name:       "   ",
+		Type:       providers.IDPTypeOAuth,
+		Properties: []cmodels.Property{*prop1, *prop2, *prop3, *prop4, *prop5, *prop6},
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPName.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_WithWhitespaceType() {
+	idp := &providers.IDPDTO{
+		Name: "Test IDP",
+		Type: "   ",
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPType.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_WithWhitespacePropertyName() {
+	prop1, _ := cmodels.NewProperty("   ", "test-value", false)
+
+	properties := []cmodels.Property{*prop1}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "property names cannot be empty")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_WithWhitespacePropertyValue() {
+	prop1, _ := cmodels.NewProperty(PropClientID, "   ", false)
+
+	properties := []cmodels.Property{*prop1}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "value cannot be empty")
+}
+
+func (s *IDPUtilsTestSuite) TestCreateAndAppendProperty_Success() {
+	propertyMap := make(map[string]cmodels.Property)
+
+	err := createAndAppendProperty(context.Background(), propertyMap, "test_prop", "test_value", false, s.logger)
+
+	s.Nil(err)
+	s.Contains(propertyMap, "test_prop")
+
+	prop := propertyMap["test_prop"]
+	value, _ := prop.GetValue()
+	s.Equal("test_value", value)
+	s.False(prop.IsSecret())
+}
+
+func (s *IDPUtilsTestSuite) TestCreateAndAppendProperty_OverwriteExisting() {
+	prop1, _ := cmodels.NewProperty("test_prop", "old_value", false)
+	propertyMap := map[string]cmodels.Property{
+		"test_prop": *prop1,
+	}
+
+	err := createAndAppendProperty(context.Background(), propertyMap, "test_prop", "new_value", false, s.logger)
+
+	s.Nil(err)
+	s.Contains(propertyMap, "test_prop")
+
+	prop := propertyMap["test_prop"]
+	value, _ := prop.GetValue()
+	s.Equal("new_value", value)
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_WithWhitespaceScopes() {
+	prop, _ := cmodels.NewProperty(PropScopes, "   ", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	s.Equal("openid,email,profile", value)
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_CommaSeparatedScopes() {
+	prop, _ := cmodels.NewProperty(PropScopes, "profile,email,address", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	// Should have openid added
+	s.Contains(value, "openid")
+	s.Contains(value, "profile")
+	s.Contains(value, "email")
+	s.Contains(value, "address")
+	// Verify comma separation
+	s.NotContains(value, " ")
+}
+
+func (s *IDPUtilsTestSuite) TestEnsureOpenIDScope_WithEmptyStringInScopes() {
+	prop, _ := cmodels.NewProperty(PropScopes, "profile,,email,,", false)
+	propertyMap := map[string]cmodels.Property{
+		PropScopes: *prop,
+	}
+
+	err := ensureOpenIDScope(context.Background(), propertyMap, s.logger)
+	s.Nil(err)
+
+	scopesProp := propertyMap[PropScopes]
+	value, _ := scopesProp.GetValue()
+	// Should have openid added and empty strings filtered out
+	s.Contains(value, "openid")
+	s.Contains(value, "profile")
+	s.Contains(value, "email")
+	// Should not have consecutive commas
+	s.NotContains(value, ",,")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_TokenExchangeOnly_OIDC_Succeeds() {
+	// OIDC IDP with only the token-exchange required props and token_exchange_enabled=true should succeed.
+	// client_id is no longer required for token exchange; issuer and jwks_endpoint are sufficient.
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop3, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "true", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_TokenExchangeAudience_OIDC_Succeeds() {
+	propIssuer, _ := cmodels.NewProperty(PropIssuer, "https://accounts.google.com", false)
+	propJWKS, _ := cmodels.NewProperty(PropJwksEndpoint, "https://www.googleapis.com/oauth2/v3/certs", false)
+	propTokenExchange, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "true", false)
+	propAudience, _ := cmodels.NewProperty(
+		PropTrustedTokenAudience, "407408718192.apps.googleusercontent.com", false)
+
+	properties := []cmodels.Property{*propIssuer, *propJWKS, *propTokenExchange, *propAudience}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_TokenExchangeEnabled_MissingIssuer_Fails() {
+	// OIDC IDP with token_exchange_enabled=true but missing issuer should fail.
+	prop1, _ := cmodels.NewProperty(PropClientID, "your_client_id", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop3, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "true", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.String(), PropIssuer)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_TokenExchangeEnabled_MissingJWKS_Fails() {
+	// OIDC IDP with token_exchange_enabled=true but missing jwks_endpoint should fail.
+	prop1, _ := cmodels.NewProperty(PropClientID, "your_client_id", false)
+	prop2, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop3, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "true", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.String(), PropJwksEndpoint)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OIDCWithoutTokenExchange_StillRequiresRedirectProps() {
+	// OIDC IDP without token_exchange_enabled must still require all 5 redirect-flow props.
+	prop1, _ := cmodels.NewProperty(PropClientID, "your_client_id", false)
+	prop2, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop3, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_OIDCWithoutTokenExchange_MissingClientSecret_Fails() {
+	// OIDC IDP without token_exchange_enabled must fail when client_secret is missing.
+	prop1, _ := cmodels.NewProperty(PropClientID, "your_client_id", false)
+	prop2, _ := cmodels.NewProperty(PropRedirectURI, "https://thunder.example.com/callback", false)
+	prop3, _ := cmodels.NewProperty(PropAuthorizationEndpoint, "https://idp.example.com/oauth2/authorize",
+		false)
+	prop4, _ := cmodels.NewProperty(PropTokenEndpoint, "https://idp.example.com/oauth2/token", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.String(), PropClientSecret)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_IDJagEnabledTrue_OIDC_Succeeds() {
+	// OIDC IDP with id_jag_enabled=true and no client credentials should succeed;
+	// issuer and jwks_endpoint alone are sufficient for trust-only connections.
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop3, _ := cmodels.NewProperty(PropIDJagEnabled, "true", false)
+	prop4, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "false", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_IDJagEnabledFalse_OIDC_Succeeds() {
+	// OIDC IDP with id_jag_enabled=false (still present) should succeed without client credentials,
+	// since the mere presence of id_jag_enabled identifies a trust-only connection.
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop3, _ := cmodels.NewProperty(PropIDJagEnabled, "false", false)
+	prop4, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "false", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3, *prop4}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.Nil(err)
+	s.NotNil(result)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_IDJagEnabled_MissingIssuer_Fails() {
+	// OIDC IDP with id_jag_enabled present but missing issuer should fail.
+	prop1, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop2, _ := cmodels.NewProperty(PropIDJagEnabled, "true", false)
+
+	properties := []cmodels.Property{*prop1, *prop2}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.String(), PropIssuer)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_IDJagEnabled_MissingJWKS_Fails() {
+	// OIDC IDP with id_jag_enabled present but missing jwks_endpoint should fail.
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropIDJagEnabled, "true", false)
+
+	properties := []cmodels.Property{*prop1, *prop2}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.String(), PropJwksEndpoint)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_IDJagEnabled_NonBooleanValue_Fails() {
+	// OIDC IDP with id_jag_enabled set to a non-boolean value should fail validation.
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop3, _ := cmodels.NewProperty(PropIDJagEnabled, "x", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.String(), PropIDJagEnabled)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_TokenExchangeEnabled_NonBooleanValue_Fails() {
+	// OIDC IDP with token_exchange_enabled set to a non-boolean value should fail validation.
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+	prop3, _ := cmodels.NewProperty(PropTokenExchangeEnabled, "yes", false)
+
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.String(), PropTokenExchangeEnabled)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_PlainOIDCWithoutIDJagOrTokenExchange_StillFails() {
+	// Plain OIDC IDP without id_jag_enabled or token_exchange_enabled and without client
+	// credentials must still fail (regression guard for the full required set).
+	prop1, _ := cmodels.NewProperty(PropIssuer, "https://idp.example.com/oauth2/token", false)
+	prop2, _ := cmodels.NewProperty(PropJwksEndpoint, "https://idp.example.com/oauth2/jwks", false)
+
+	properties := []cmodels.Property{*prop1, *prop2}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOIDC, properties, s.logger)
+
+	s.NotNil(err)
+	s.Nil(result)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+	s.Contains(err.ErrorDescription.DefaultValue, "required property")
+	s.Contains(err.ErrorDescription.String(), PropClientID)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDP_PropertyValidationFailure() {
+	prop, _ := cmodels.NewProperty("", "value", false)
+	idp := &providers.IDPDTO{
+		Name:       "Test IDP",
+		Type:       providers.IDPTypeOAuth,
+		Properties: []cmodels.Property{*prop},
+	}
+
+	err := validateIDP(context.Background(), idp, s.logger)
+
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_SecretPropertyValueUnreadable() {
+	// Initialize the server runtime with the test crypto key; the secret
+	// property below holds a value that is not valid ciphertext, so reading
+	// it fails on decryption.
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime("/tmp/test", &config.Config{
+		Crypto: config.CryptoConfig{
+			Encryption: engineconfig.EncryptionConfig{
+				Key: testCryptoKey,
+			},
+		},
+	})
+	defer config.ResetServerRuntime()
+
+	properties, dErr := cmodels.DeserializePropertiesFromJSONObject(
+		`{"client_secret":{"value":"not-valid-ciphertext","isSecret":true}}`)
+	s.NoError(dErr)
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeOAuth, properties, s.logger)
+
+	s.Nil(result)
+	s.NotNil(err)
+	s.Equal(ErrorInvalidIDPProperty.Code, err.Code)
+}
+
+func (s *IDPUtilsTestSuite) TestResolveEndpointDefaults_EmptyBase_ReturnsInputUnchanged() {
+	defaults := map[string]string{PropAuthorizationEndpoint: googleAuthorizationEndpoint}
+
+	result := resolveEndpointDefaults(defaults, "")
+
+	s.Equal(defaults[PropAuthorizationEndpoint], result[PropAuthorizationEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestResolveEndpointDefaults_RewritesSchemeAndHostOnly() {
+	defaults := map[string]string{
+		PropAuthorizationEndpoint: googleAuthorizationEndpoint,
+		PropTokenEndpoint:         googleTokenEndpoint,
+	}
+
+	result := resolveEndpointDefaults(defaults, "http://localhost:8093")
+
+	s.Equal("http://localhost:8093/o/oauth2/v2/auth", result[PropAuthorizationEndpoint])
+	s.Equal("http://localhost:8093/token", result[PropTokenEndpoint])
+	// Original map must not be mutated.
+	s.Equal(googleAuthorizationEndpoint, defaults[PropAuthorizationEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestResolveEndpointDefaults_InvalidBase_ReturnsInputUnchanged() {
+	defaults := map[string]string{PropAuthorizationEndpoint: googleAuthorizationEndpoint}
+
+	result := resolveEndpointDefaults(defaults, "://not-a-valid-url")
+
+	s.Equal(defaults[PropAuthorizationEndpoint], result[PropAuthorizationEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestResolveEndpointDefaults_HostlessBase_ReturnsInputUnchanged() {
+	defaults := map[string]string{PropAuthorizationEndpoint: googleAuthorizationEndpoint}
+
+	result := resolveEndpointDefaults(defaults, "/mock")
+
+	s.Equal(defaults[PropAuthorizationEndpoint], result[PropAuthorizationEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestResolveEndpointDefaults_NonHTTPBase_ReturnsInputUnchanged() {
+	defaults := map[string]string{PropAuthorizationEndpoint: googleAuthorizationEndpoint}
+
+	result := resolveEndpointDefaults(defaults, "localhost:8093")
+
+	s.Equal(defaults[PropAuthorizationEndpoint], result[PropAuthorizationEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestResolveEndpointDefaults_InvalidValue_KeepsOriginal() {
+	defaults := map[string]string{PropAuthorizationEndpoint: "http://exa\nmple.com"}
+
+	result := resolveEndpointDefaults(defaults, "http://localhost:8093")
+
+	s.Equal(defaults[PropAuthorizationEndpoint], result[PropAuthorizationEndpoint])
+}
+
+func (s *IDPUtilsTestSuite) TestEndpointBaseURLOverride_GitHub_ReturnsConfiguredValue() {
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime("/tmp/test", &config.Config{
+		IdentityProvider: config.IdentityProviderConfig{
+			GitHubBaseURL: "http://localhost:8092",
+		},
+	})
+	defer config.ResetServerRuntime()
+
+	result := endpointBaseURLOverride(providers.IDPTypeGitHub)
+
+	s.Equal("http://localhost:8092", result)
+}
+
+func (s *IDPUtilsTestSuite) TestEndpointBaseURLOverride_NilRuntime_ReturnsEmpty() {
+	config.ResetServerRuntime()
+
+	result := endpointBaseURLOverride(providers.IDPTypeGoogle)
+
+	s.Empty(result)
+}
+
+func (s *IDPUtilsTestSuite) TestEndpointBaseURLOverride_NonGoogleGitHubType_ReturnsEmpty() {
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime("/tmp/test", &config.Config{
+		IdentityProvider: config.IdentityProviderConfig{
+			GoogleBaseURL: "http://localhost:8093",
+			GitHubBaseURL: "http://localhost:8092",
+		},
+	})
+	defer config.ResetServerRuntime()
+
+	result := endpointBaseURLOverride(providers.IDPTypeOAuth)
+
+	s.Empty(result)
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_AppliesEndpointOverride_WhenConfigured() {
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime("/tmp/test", &config.Config{
+		Crypto: config.CryptoConfig{
+			Encryption: engineconfig.EncryptionConfig{Key: testCryptoKey},
+		},
+		IdentityProvider: config.IdentityProviderConfig{
+			GoogleBaseURL: "http://localhost:8093",
+		},
+	})
+	defer config.ResetServerRuntime()
+
+	prop1, _ := cmodels.NewProperty(PropClientID, "client-id", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "client-secret", true)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "https://app/callback", false)
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGoogle, properties, s.logger)
+
+	s.Nil(err)
+	s.Equal("http://localhost:8093/o/oauth2/v2/auth", GetPropertyValue(result, PropAuthorizationEndpoint))
+	s.Equal("http://localhost:8093/token", GetPropertyValue(result, PropTokenEndpoint))
+}
+
+func (s *IDPUtilsTestSuite) TestValidateIDPProperties_NoEndpointOverride_UsesRealEndpoints() {
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime("/tmp/test", &config.Config{
+		Crypto: config.CryptoConfig{
+			Encryption: engineconfig.EncryptionConfig{Key: testCryptoKey},
+		},
+	})
+	defer config.ResetServerRuntime()
+
+	prop1, _ := cmodels.NewProperty(PropClientID, "client-id", false)
+	prop2, _ := cmodels.NewProperty(PropClientSecret, "client-secret", true)
+	prop3, _ := cmodels.NewProperty(PropRedirectURI, "https://app/callback", false)
+	properties := []cmodels.Property{*prop1, *prop2, *prop3}
+
+	result, err := validateIDPProperties(context.Background(), providers.IDPTypeGoogle, properties, s.logger)
+
+	s.Nil(err)
+	s.Equal(googleAuthorizationEndpoint, GetPropertyValue(result, PropAuthorizationEndpoint))
+	s.Equal(googleTokenEndpoint, GetPropertyValue(result, PropTokenEndpoint))
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_NilMappings_NoOp() {
+	attrs := map[string]interface{}{"email": "user@example.com"}
+	result := ApplyAttributeMappings(attrs, nil)
+	s.Equal(attrs, result)
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_EmptyMappings_NoOp() {
+	attrs := map[string]interface{}{"email": "user@example.com"}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{})
+	s.Equal(attrs, result)
+}
+
+// Mappings copy rather than rename, so the source claim survives alongside the local attribute.
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_PublishesMappedClaimAndKeepsSource() {
+	attrs := map[string]interface{}{
+		"http://schemas.example.com/emailaddress": "user@example.com",
+	}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{
+		{ExternalAttribute: "http://schemas.example.com/emailaddress", LocalAttribute: "email"},
+	})
+	s.Equal("user@example.com", result["email"])
+	s.Equal("user@example.com", result["http://schemas.example.com/emailaddress"])
+}
+
+// The case the copy semantics exist for: mapping an email onto a required username must not leave the
+// identity without an email.
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_EmailSurvivesAUsernameMapping() {
+	attrs := map[string]interface{}{"email": "user@example.com", "sub": "user-123"}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{
+		{ExternalAttribute: "email", LocalAttribute: "username"},
+	})
+	s.Equal("user@example.com", result["username"])
+	s.Equal("user@example.com", result["email"])
+	s.Equal("user-123", result["sub"])
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_OneSourceToMultipleTargets() {
+	attrs := map[string]interface{}{"email": "user@example.com"}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{
+		{ExternalAttribute: "email", LocalAttribute: "email"},
+		{ExternalAttribute: "email", LocalAttribute: "contactEmail"},
+	})
+	s.Equal("user@example.com", result["email"])
+	s.Equal("user@example.com", result["contactEmail"])
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_UnmappedPassesThrough() {
+	attrs := map[string]interface{}{
+		"given_name": "Jane",
+		"department": "engineering",
+	}
+	result := ApplyAttributeMappings(
+		attrs, []providers.AttributeMapping{{ExternalAttribute: "given_name", LocalAttribute: "firstName"}})
+	s.Equal("Jane", result["firstName"])
+	s.Equal("engineering", result["department"])
+	s.Equal("Jane", result["given_name"])
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_MappedValueOverridesCollision() {
+	attrs := map[string]interface{}{
+		"given_name": "Jane",
+		"firstName":  "stale",
+	}
+	result := ApplyAttributeMappings(
+		attrs, []providers.AttributeMapping{{ExternalAttribute: "given_name", LocalAttribute: "firstName"}})
+	s.Equal("Jane", result["firstName"])
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_MissingExternalClaimIgnored() {
+	attrs := map[string]interface{}{"email": "user@example.com"}
+	result := ApplyAttributeMappings(
+		attrs, []providers.AttributeMapping{{ExternalAttribute: "given_name", LocalAttribute: "firstName"}})
+	s.Equal("user@example.com", result["email"])
+	_, present := result["firstName"]
+	s.False(present)
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_NestedSourcePath() {
+	attrs := map[string]interface{}{
+		"address": map[string]interface{}{
+			"email": "user@example.com",
+		},
+		"keep": "value",
+	}
+	result := ApplyAttributeMappings(
+		attrs, []providers.AttributeMapping{{ExternalAttribute: "address.email", LocalAttribute: "email"}})
+	s.Equal("user@example.com", result["email"])
+	// The containing nested object is read non-destructively and passes through.
+	s.Equal(attrs["address"], result["address"])
+	s.Equal("value", result["keep"])
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_DottedKeyMatchedLiterallyBeforePath() {
+	// A URI-style claim name containing dots must be matched literally, not split into a path.
+	attrs := map[string]interface{}{
+		"http://schemas.example.com/emailaddress": "user@example.com",
+	}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{
+		{ExternalAttribute: "http://schemas.example.com/emailaddress", LocalAttribute: "email"},
+	})
+	s.Equal("user@example.com", result["email"])
+}
+
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_SubPreservedWhenMappedToMultipleTargets() {
+	attrs := map[string]interface{}{"sub": "user-123"}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{
+		{ExternalAttribute: "sub", LocalAttribute: "username"},
+		{ExternalAttribute: "sub", LocalAttribute: "email"},
+	})
+	s.Equal("user-123", result["sub"])
+	s.Equal("user-123", result["username"])
+	s.Equal("user-123", result["email"])
+}
+
+// sub needed a carve-out under rename semantics; under copy semantics every source is preserved and
+// it is no longer a special case.
+func (s *IDPUtilsTestSuite) TestApplyAttributeMappings_AllSourcesPreserved() {
+	attrs := map[string]interface{}{
+		"sub":        "user-123",
+		"given_name": "Jane",
+	}
+	result := ApplyAttributeMappings(attrs, []providers.AttributeMapping{
+		{ExternalAttribute: "sub", LocalAttribute: "picture"},
+		{ExternalAttribute: "given_name", LocalAttribute: "firstName"},
+	})
+	s.Equal("user-123", result["sub"])
+	s.Equal("user-123", result["picture"])
+	s.Equal("Jane", result["firstName"])
+	s.Equal("Jane", result["given_name"])
+}
+
+func (s *IDPUtilsTestSuite) TestGetAttributeMappings_NilIDP() {
+	s.Nil(GetAttributeMappings(nil, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetAttributeMappings_NilAttributeConfiguration() {
+	s.Nil(GetAttributeMappings(&providers.IDPDTO{}, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetAttributeMappings_ReturnsMappings() {
+	mappings := []providers.AttributeMapping{{ExternalAttribute: "given_name", LocalAttribute: "firstName"}}
+	idpDTO := &providers.IDPDTO{AttributeConfiguration: &providers.AttributeConfiguration{
+		UserTypeResolution:        &providers.UserTypeResolution{Default: "person"},
+		UserTypeAttributeMappings: []providers.UserTypeAttributeMapping{{UserType: "person", Attributes: mappings}},
+	}}
+	s.Equal(mappings, GetAttributeMappings(idpDTO, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetAttributeMappings_ResolvedByClaim() {
+	personMappings := []providers.AttributeMapping{{ExternalAttribute: "given_name", LocalAttribute: "firstName"}}
+	employeeMappings := []providers.AttributeMapping{{ExternalAttribute: "emp_id", LocalAttribute: "employeeNumber"}}
+	idpDTO := &providers.IDPDTO{AttributeConfiguration: &providers.AttributeConfiguration{
+		UserTypeResolution: &providers.UserTypeResolution{
+			Default:           "person",
+			ExternalAttribute: "user_type",
+			ValueMapping:      map[string]string{"staff": "employee"},
+		},
+		UserTypeAttributeMappings: []providers.UserTypeAttributeMapping{
+			{UserType: "person", Attributes: personMappings},
+			{UserType: "employee", Attributes: employeeMappings},
+		},
+	}}
+	s.Equal(employeeMappings, GetAttributeMappings(idpDTO, map[string]interface{}{"user_type": "staff"}))
+}
+
+func (s *IDPUtilsTestSuite) TestGetMappedUserType_NilIDP() {
+	s.Equal("", GetMappedUserType(nil, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetMappedUserType_NilAttributeConfiguration() {
+	s.Equal("", GetMappedUserType(&providers.IDPDTO{}, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetMappedUserType_ReturnsEntityType() {
+	s.Equal("person", GetMappedUserType(&providers.IDPDTO{AttributeConfiguration: &providers.AttributeConfiguration{
+		UserTypeResolution: &providers.UserTypeResolution{Default: "person"},
+	}}, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetMappedUserType_DynamicResolution() {
+	idpDTO := &providers.IDPDTO{AttributeConfiguration: &providers.AttributeConfiguration{
+		UserTypeResolution: &providers.UserTypeResolution{
+			Default:           "person",
+			ExternalAttribute: "user_type",
+			ValueMapping:      map[string]string{"staff": "employee", "client": "customer"},
+		},
+	}}
+
+	// Mapped value resolves to its user type.
+	s.Equal("employee", GetMappedUserType(idpDTO, map[string]interface{}{"user_type": "staff"}))
+	// Unmapped value falls back to the default.
+	s.Equal("person", GetMappedUserType(idpDTO, map[string]interface{}{"user_type": "guest"}))
+	// Missing attribute falls back to the default.
+	s.Equal("person", GetMappedUserType(idpDTO, map[string]interface{}{"other": "x"}))
+	// Nil claims fall back to the default.
+	s.Equal("person", GetMappedUserType(idpDTO, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetMappedUserType_DirectValueResolution() {
+	idpDTO := &providers.IDPDTO{AttributeConfiguration: &providers.AttributeConfiguration{
+		UserTypeResolution: &providers.UserTypeResolution{
+			Default:           "person",
+			ExternalAttribute: "user_type",
+		},
+	}}
+
+	// With no value mapping, the external claim value is used directly as the user type.
+	s.Equal("employee", GetMappedUserType(idpDTO, map[string]interface{}{"user_type": "employee"}))
+	// Missing attribute falls back to the default.
+	s.Equal("person", GetMappedUserType(idpDTO, map[string]interface{}{"other": "x"}))
+	// Empty claim value falls back to the default.
+	s.Equal("person", GetMappedUserType(idpDTO, map[string]interface{}{"user_type": "  "}))
+	// Nil claims fall back to the default.
+	s.Equal("person", GetMappedUserType(idpDTO, nil))
+}
+
+func (s *IDPUtilsTestSuite) TestGetMappedUserType_DynamicResolutionNestedClaim() {
+	idpDTO := &providers.IDPDTO{AttributeConfiguration: &providers.AttributeConfiguration{
+		UserTypeResolution: &providers.UserTypeResolution{
+			Default:           "person",
+			ExternalAttribute: "profile.role",
+			ValueMapping:      map[string]string{"admin": "employee"},
+		},
+	}}
+	claims := map[string]interface{}{"profile": map[string]interface{}{"role": "admin"}}
+	s.Equal("employee", GetMappedUserType(idpDTO, claims))
+}
+
+func (s *IDPUtilsTestSuite) TestIDJagEnabledFromProperties_True() {
+	prop, err := cmodels.NewProperty(PropIDJagEnabled, "true", false)
+	s.NoError(err)
+
+	got := idJagEnabledFromProperties([]cmodels.Property{*prop})
+	s.Require().NotNil(got)
+	s.True(*got)
+}
+
+func (s *IDPUtilsTestSuite) TestIDJagEnabledFromProperties_False() {
+	prop, err := cmodels.NewProperty(PropIDJagEnabled, "false", false)
+	s.NoError(err)
+
+	got := idJagEnabledFromProperties([]cmodels.Property{*prop})
+	s.Require().NotNil(got)
+	s.False(*got)
+}
+
+func (s *IDPUtilsTestSuite) TestIDJagEnabledFromProperties_Absent() {
+	prop, err := cmodels.NewProperty("client_id", "abc", false)
+	s.NoError(err)
+
+	s.Nil(idJagEnabledFromProperties([]cmodels.Property{*prop}))
+	s.Nil(idJagEnabledFromProperties(nil))
+}
+
+func (s *IDPUtilsTestSuite) TestIDJagEnabledFromProperties_InvalidValue() {
+	prop, err := cmodels.NewProperty(PropIDJagEnabled, "not-a-bool", false)
+	s.NoError(err)
+
+	s.Nil(idJagEnabledFromProperties([]cmodels.Property{*prop}))
+}

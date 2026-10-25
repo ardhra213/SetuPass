@@ -1,0 +1,674 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	authncm "github.com/thunder-id/thunderid/internal/authn/common"
+	entitytypemodel "github.com/thunder-id/thunderid/internal/entitytype/model"
+	"github.com/thunder-id/thunderid/internal/flow/common"
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+	"github.com/thunder-id/thunderid/tests/mocks/authnprovider/managermock"
+	"github.com/thunder-id/thunderid/tests/mocks/flow/coremock"
+	"github.com/thunder-id/thunderid/tests/mocks/idp/idpmock"
+)
+
+// expectEntityReferenceResolved stubs GetEntityReference to resolve authUser to an existing local
+// user, modeling account linking that matched an existing local account.
+func expectEntityReferenceResolved(m *managermock.AuthnProviderManagerMock, authUser providers.AuthUser) {
+	m.On("GetEntityReference", mock.Anything, mock.Anything).
+		Return(authUser, &providers.EntityReference{EntityID: "local-user-123"}, (*tidcommon.ServiceError)(nil))
+}
+
+// expectEntityReferenceNotFound stubs GetEntityReference to report no matching local user,
+// modeling account linking that did not resolve to an existing local account.
+func expectEntityReferenceNotFound(m *managermock.AuthnProviderManagerMock, authUser providers.AuthUser) {
+	m.On("GetEntityReference", mock.Anything, mock.Anything).
+		Return(authUser, (*providers.EntityReference)(nil),
+			&tidcommon.ServiceError{Type: tidcommon.ClientErrorType, Code: "USER_NOT_FOUND"})
+}
+
+// setupSocialAuthExecutorMock creates the shared mocks for social auth executor constructor tests
+// (GitHub, Google) and wires the CreateExecutor expectation for the given executor name.
+func setupSocialAuthExecutorMock(t *testing.T, executorName string) (
+	*coremock.FlowFactoryInterfaceMock,
+	*idpmock.IDPServiceInterfaceMock,
+	*managermock.AuthnProviderManagerMock,
+) {
+	t.Helper()
+	mockFlowFactory := coremock.NewFlowFactoryInterfaceMock(t)
+	mockIDPService := idpmock.NewIDPServiceInterfaceMock(t)
+	mockAuthnProvider := managermock.NewAuthnProviderManagerMock(t)
+	baseExec := coremock.NewExecutorInterfaceMock(t)
+	mockFlowFactory.On("CreateExecutor", executorName,
+		providers.ExecutorTypeAuthentication, defaultCodeOnlyInputs, []providers.Input{}, mock.Anything).
+		Return(baseExec).Once()
+	return mockFlowFactory, mockIDPService, mockAuthnProvider
+}
+
+type UtilsTestSuite struct {
+	suite.Suite
+}
+
+func TestUtilsTestSuite(t *testing.T) {
+	suite.Run(t, new(UtilsTestSuite))
+}
+
+func (s *UtilsTestSuite) TestGetAuthnServiceName() {
+	tests := []struct {
+		name         string
+		executorName string
+		expectedName string
+	}{
+		{"CredentialsAuth executor", ExecutorNameCredentialsAuth, authncm.AuthenticatorCredentials},
+		{"OTP executor", ExecutorNameOTPExecutor, authncm.AuthenticatorOTP},
+		{"OAuth executor", ExecutorNameOAuth, authncm.AuthenticatorOAuth},
+		{"OIDC Auth executor", ExecutorNameOIDCAuth, authncm.AuthenticatorOIDC},
+		{"GitHub Auth executor", ExecutorNameGitHubAuth, authncm.AuthenticatorGithub},
+		{"Google Auth executor", ExecutorNameGoogleAuth, authncm.AuthenticatorGoogle},
+		{"MagicLink executor", ExecutorNameMagicLink, authncm.AuthenticatorMagicLink},
+		{"Unknown executor returns empty string", "UnknownExecutor", ""},
+		{"Provisioning executor returns empty string", ExecutorNameProvisioning, ""},
+		{"AuthAssert executor returns empty string", ExecutorNameAuthAssert, ""},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			result := getAuthnServiceName(tt.executorName)
+			s.Equal(tt.expectedName, result)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestInputTypeForSchemaType() {
+	tests := []struct {
+		name         string
+		schemaType   string
+		expectedType string
+	}{
+		{"Boolean attribute is prompted as a checkbox", entitytypemodel.TypeBoolean, providers.InputTypeBoolean},
+		{"Number attribute is prompted as a number input", entitytypemodel.TypeNumber, providers.InputTypeNumber},
+		{"String attribute is prompted as text", entitytypemodel.TypeString, providers.InputTypeText},
+		{"Unknown type falls back to text", "geo", providers.InputTypeText},
+		{"Empty type falls back to text", "", providers.InputTypeText},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Equal(tt.expectedType, inputTypeForSchemaType(tt.schemaType))
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestSchemaTypeForInputType() {
+	tests := []struct {
+		name         string
+		inputType    string
+		expectedType string
+	}{
+		{"Checkbox maps to boolean", providers.InputTypeBoolean, entitytypemodel.TypeBoolean},
+		{"Number input maps to number", providers.InputTypeNumber, entitytypemodel.TypeNumber},
+		{"Text input needs no conversion", providers.InputTypeText, ""},
+		{"Unset input type needs no conversion", "", ""},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Equal(tt.expectedType, schemaTypeForInputType(tt.inputType))
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestConvertToSchemaType() {
+	tests := []struct {
+		name          string
+		value         string
+		schemaType    string
+		expectedValue interface{}
+	}{
+		{"Checked box becomes true", "true", entitytypemodel.TypeBoolean, true},
+		{"Unchecked box becomes false", "false", entitytypemodel.TypeBoolean, false},
+		{"Boolean accepts alternate spellings", "TRUE", entitytypemodel.TypeBoolean, true},
+		{"Unparseable boolean is left for schema validation to reject", "yes", entitytypemodel.TypeBoolean, "yes"},
+		{"Number becomes a float", "42", entitytypemodel.TypeNumber, float64(42)},
+		{"Fractional number becomes a float", "1.5", entitytypemodel.TypeNumber, 1.5},
+		{"Unparseable number is left for schema validation to reject", "many", entitytypemodel.TypeNumber, "many"},
+		{"String attribute is untouched", "true", entitytypemodel.TypeString, "true"},
+		{"Unknown schema type is untouched", "true", "", "true"},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Equal(tt.expectedValue, convertToSchemaType(tt.value, tt.schemaType))
+		})
+	}
+}
+
+// defaultCodeOnlyInputs is the standard default input set for OAuth/OIDC executors that only require an
+// authorization code.
+var defaultCodeOnlyInputs = []providers.Input{
+	{Identifier: "code", Type: "string", Required: true},
+}
+
+// createMockAuthExecutor creates a mock executor for OAuth/OIDC authentication.
+func createMockAuthExecutor(t *testing.T, executorName string) providers.Executor {
+	mockExec := coremock.NewExecutorInterfaceMock(t)
+	mockExec.On("GetName").Return(executorName).Maybe()
+	mockExec.On("GetType").Return(providers.ExecutorTypeAuthentication).Maybe()
+	mockExec.On("GetDefaultInputs").Return(defaultCodeOnlyInputs).Maybe()
+	mockExec.On("GetPrerequisites").Return([]providers.Input{}).Maybe()
+	mockExec.On("HasRequiredInputs", mock.Anything, mock.Anything).Return(
+		func(ctx *providers.NodeContext, execResp *providers.ExecutorResponse) bool {
+			if code, ok := ctx.UserInputs["code"]; ok && code != "" {
+				return true
+			}
+			if len(ctx.NodeInputs) == 0 {
+				return true
+			}
+			execResp.Inputs = []providers.Input{{Identifier: "code", Type: "string", Required: true}}
+			return false
+		}).Maybe()
+	return mockExec
+}
+
+func (s *UtilsTestSuite) TestGetUserAttribute() {
+	tests := []struct {
+		name         string
+		user         *providers.Entity
+		attributeKey string
+		expectedVal  string
+		expectError  bool
+	}{
+		{
+			name: "Success case",
+			user: &providers.Entity{
+				Attributes: []byte(`{"email":"user@example.com"}`),
+			},
+			attributeKey: "email",
+			expectedVal:  "user@example.com",
+			expectError:  false,
+		},
+		{
+			name:         "Nil user",
+			user:         nil,
+			attributeKey: "email",
+			expectError:  true,
+		},
+		{
+			name: "Empty attributes",
+			user: &providers.Entity{
+				Attributes: []byte(``),
+			},
+			attributeKey: "email",
+			expectError:  true,
+		},
+		{
+			name: "Invalid JSON attributes",
+			user: &providers.Entity{
+				Attributes: []byte(`invalid-json`),
+			},
+			attributeKey: "email",
+			expectError:  true,
+		},
+		{
+			name: "Attribute not found",
+			user: &providers.Entity{
+				Attributes: []byte(`{"other":"data"}`),
+			},
+			attributeKey: "email",
+			expectError:  true,
+		},
+		{
+			name: "Non-string attribute value",
+			user: &providers.Entity{
+				Attributes: []byte(`{"email":123}`),
+			},
+			attributeKey: "email",
+			expectError:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			val, err := GetUserAttribute(tt.user, tt.attributeKey)
+			if tt.expectError {
+				s.Error(err)
+				s.Empty(val)
+			} else {
+				s.NoError(err)
+				s.Equal(tt.expectedVal, val)
+			}
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestIsAuthenticationWithoutLocalUserAllowed() {
+	tests := []struct {
+		name       string
+		properties map[string]interface{}
+		expected   bool
+	}{
+		{
+			name: "Property true",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowAuthenticationWithoutLocalUser: true,
+			},
+			expected: true,
+		},
+		{
+			name: "Property false",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowAuthenticationWithoutLocalUser: false,
+			},
+			expected: false,
+		},
+		{
+			name: "Property missing",
+			properties: map[string]interface{}{
+				"other": true,
+			},
+			expected: false,
+		},
+		{
+			name: "Property invalid type",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowAuthenticationWithoutLocalUser: "true",
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := &providers.NodeContext{NodeProperties: tt.properties}
+			result := isAuthenticationWithoutLocalUserAllowed(ctx)
+			s.Equal(tt.expected, result)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestFindInputByType() {
+	tests := []struct {
+		name        string
+		inputs      []providers.Input
+		inputType   string
+		expected    providers.Input
+		expectFound bool
+	}{
+		{
+			name:        "Empty inputs",
+			inputs:      []providers.Input{},
+			inputType:   providers.InputTypeEmail,
+			expected:    providers.Input{},
+			expectFound: false,
+		},
+		{
+			name: "Type found",
+			inputs: []providers.Input{
+				{Identifier: "mobile", Type: "phone"},
+				{Identifier: "workEmail", Type: providers.InputTypeEmail},
+			},
+			inputType:   providers.InputTypeEmail,
+			expected:    providers.Input{Identifier: "workEmail", Type: providers.InputTypeEmail},
+			expectFound: true,
+		},
+		{
+			name: "Type not found",
+			inputs: []providers.Input{
+				{Identifier: "mobile", Type: "phone"},
+			},
+			inputType:   providers.InputTypeEmail,
+			expected:    providers.Input{},
+			expectFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			res, found := findInputByType(tt.inputs, tt.inputType)
+			s.Equal(tt.expectFound, found)
+			s.Equal(tt.expected, res)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestIsRegistrationWithExistingUserAllowed() {
+	tests := []struct {
+		name       string
+		properties map[string]interface{}
+		expected   bool
+	}{
+		{
+			name: "Property true",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowRegistrationWithExistingUser: true,
+			},
+			expected: true,
+		},
+		{
+			name: "Property false",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowRegistrationWithExistingUser: false,
+			},
+			expected: false,
+		},
+		{
+			name: "Property missing",
+			properties: map[string]interface{}{
+				"other": true,
+			},
+			expected: false,
+		},
+		{
+			name: "Property invalid type",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowRegistrationWithExistingUser: 1,
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := &providers.NodeContext{NodeProperties: tt.properties}
+			result := isRegistrationWithExistingUserAllowed(ctx)
+			s.Equal(tt.expected, result)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestResolveInputIdentifierByType() {
+	tests := []struct {
+		name      string
+		ctx       *providers.NodeContext
+		inputType string
+		fallback  string
+		expected  string
+	}{
+		{
+			name: "Type found in NodeInputs",
+			ctx: &providers.NodeContext{
+				NodeInputs: []providers.Input{
+					{Identifier: "customEmailIdentifier", Type: providers.InputTypeEmail},
+				},
+			},
+			inputType: providers.InputTypeEmail,
+			fallback:  "defaultEmail",
+			expected:  "customEmailIdentifier",
+		},
+		{
+			name: "Type not found, returns fallback",
+			ctx: &providers.NodeContext{
+				NodeInputs: []providers.Input{
+					{Identifier: "phone", Type: "mobile"},
+				},
+			},
+			inputType: providers.InputTypeEmail,
+			fallback:  "defaultEmail",
+			expected:  "defaultEmail",
+		},
+		{
+			name: "Empty NodeInputs, returns fallback",
+			ctx: &providers.NodeContext{
+				NodeInputs: []providers.Input{},
+			},
+			inputType: providers.InputTypeEmail,
+			fallback:  "defaultEmail",
+			expected:  "defaultEmail",
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			result := resolveInputIdentifierByType(tt.ctx, tt.inputType, tt.fallback)
+			s.Equal(tt.expected, result)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestIsCrossOUProvisioningAllowed() {
+	tests := []struct {
+		name       string
+		properties map[string]interface{}
+		expected   bool
+	}{
+		{
+			name: "Property true",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowCrossOUProvisioning: true,
+			},
+			expected: true,
+		},
+		{
+			name: "Property false",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowCrossOUProvisioning: false,
+			},
+			expected: false,
+		},
+		{
+			name: "Property missing",
+			properties: map[string]interface{}{
+				"other": true,
+			},
+			expected: false,
+		},
+		{
+			name: "Property invalid type",
+			properties: map[string]interface{}{
+				common.NodePropertyAllowCrossOUProvisioning: []string{"true"},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := &providers.NodeContext{NodeProperties: tt.properties}
+			result := isCrossOUProvisioningAllowed(ctx)
+			s.Equal(tt.expected, result)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestValidateFederatedIdentifierConsistency() {
+	tests := []struct {
+		name                 string
+		federatedIdentifiers map[string]interface{}
+		existingIdentifiers  map[string]interface{}
+		ctx                  *providers.NodeContext
+		expectedValid        bool
+	}{
+		{
+			name:                 "Nil federated identifiers returns true",
+			federatedIdentifiers: nil,
+			existingIdentifiers:  nil,
+			ctx:                  &providers.NodeContext{},
+			expectedValid:        true,
+		},
+		{
+			name:                 "Empty federated identifiers returns true",
+			federatedIdentifiers: map[string]interface{}{},
+			existingIdentifiers:  map[string]interface{}{},
+			ctx:                  &providers.NodeContext{},
+			expectedValid:        true,
+		},
+		{
+			name: "Email matches UserInputs returns true",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				UserInputs: map[string]string{
+					"email": "user@example.com",
+				},
+			},
+			expectedValid: true,
+		},
+		{
+			name: "Email mismatch with UserInputs returns false",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user1@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				UserInputs: map[string]string{
+					"email": "user2@example.com",
+				},
+			},
+			expectedValid: false,
+		},
+		{
+			name: "Email matches RuntimeData returns true",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				RuntimeData: map[string]string{
+					"email": "user@example.com",
+				},
+			},
+			expectedValid: true,
+		},
+		{
+			name: "Email mismatch with RuntimeData returns false",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user1@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				RuntimeData: map[string]string{
+					"email": "user2@example.com",
+				},
+			},
+			expectedValid: false,
+		},
+		{
+			name: "Email matches existing identifiers returns true",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+			},
+			ctx:           &providers.NodeContext{},
+			expectedValid: true,
+		},
+		{
+			name: "Email mismatch with existing identifiers returns false",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user1@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{
+				"email": "user2@example.com",
+			},
+			ctx:           &providers.NodeContext{},
+			expectedValid: false,
+		},
+		{
+			name: "Sub matches RuntimeData returns true",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				RuntimeData: map[string]string{
+					"sub": "sub123",
+				},
+			},
+			expectedValid: true,
+		},
+		{
+			name: "Sub mismatch with RuntimeData returns false",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				RuntimeData: map[string]string{
+					"sub": "sub456",
+				},
+			},
+			expectedValid: false,
+		},
+		{
+			name: "Empty UserInputs email is skipped",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				UserInputs: map[string]string{
+					"email": "",
+				},
+			},
+			expectedValid: true,
+		},
+		{
+			name: "Empty RuntimeData email is skipped",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				RuntimeData: map[string]string{
+					"email": "",
+				},
+			},
+			expectedValid: true,
+		},
+		{
+			name: "Missing email from UserInputs and RuntimeData is allowed",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx:                 &providers.NodeContext{},
+			expectedValid:       true,
+		},
+		{
+			name: "Multiple attributes with one mismatch returns false",
+			federatedIdentifiers: map[string]interface{}{
+				"email": "user1@example.com",
+				"sub":   "sub123",
+			},
+			existingIdentifiers: map[string]interface{}{},
+			ctx: &providers.NodeContext{
+				UserInputs: map[string]string{
+					"email": "user1@example.com",
+					"sub":   "sub456",
+				},
+				RuntimeData: map[string]string{
+					"sub": "sub123",
+				},
+			},
+			expectedValid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			valid := validateFederatedIdentifierConsistency(tt.ctx, tt.federatedIdentifiers, tt.existingIdentifiers)
+			s.Equal(tt.expectedValid, valid)
+		})
+	}
+}

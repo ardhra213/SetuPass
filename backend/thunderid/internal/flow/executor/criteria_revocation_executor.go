@@ -1,0 +1,52 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"fmt"
+
+	"github.com/thunder-id/thunderid/internal/flow/core"
+	"github.com/thunder-id/thunderid/internal/revocation"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+// criteriaRevocationExecutor persists the criteria carried by the trusted revocation plan.
+type criteriaRevocationExecutor struct {
+	providers.Executor
+	revoker revocation.CriteriaRevoker
+}
+
+var _ providers.Executor = (*criteriaRevocationExecutor)(nil)
+
+// newCriteriaRevocationExecutor creates an executor that persists a trusted criteria revocation plan.
+func newCriteriaRevocationExecutor(factory core.FlowFactoryInterface,
+	revoker revocation.CriteriaRevoker) *criteriaRevocationExecutor {
+	base := factory.CreateExecutor(ExecutorNameCriteriaRevocation, providers.ExecutorTypeUtility,
+		nil, nil, &providers.ExecutorMeta{
+			SupportedFlowTypes: []providers.FlowType{providers.FlowTypeAdministration},
+		})
+	return &criteriaRevocationExecutor{Executor: base, revoker: revoker}
+}
+
+// Execute records every criterion from the trusted revocation plan.
+func (e *criteriaRevocationExecutor) Execute(ctx *providers.NodeContext) (*providers.ExecutorResponse, error) {
+	if e.revoker == nil {
+		return nil, fmt.Errorf("criteria revoker is not configured")
+	}
+	plan, err := decodeRevocationPlan(ctx.SharedRuntimeData)
+	if err != nil {
+		return nil, err
+	}
+	for _, criterion := range plan.Criteria {
+		if err := e.revoker.RevokeByCriteria(ctx.Context, revocation.CriteriaRevocation{
+			Criterion: criterion,
+			Mode:      plan.Mode,
+			Cutoff:    plan.Cutoff,
+			Reason:    plan.Reason,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to revoke tokens by criteria: %w", err)
+		}
+	}
+	return &providers.ExecutorResponse{Status: providers.ExecComplete}, nil
+}

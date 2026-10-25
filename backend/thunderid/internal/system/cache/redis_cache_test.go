@@ -1,0 +1,182 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package cache
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/config"
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+)
+
+type RedisCacheTestSuite struct {
+	suite.Suite
+}
+
+func TestRedisCacheSuite(t *testing.T) {
+	suite.Run(t, new(RedisCacheTestSuite))
+}
+
+func (suite *RedisCacheTestSuite) SetupSuite() {
+	mockConfig := &config.Config{
+		Cache: engineconfig.CacheConfig{
+			Disabled:        false,
+			Type:            "redis",
+			Size:            1000,
+			TTL:             3600,
+			EvictionPolicy:  "LRU",
+			CleanupInterval: 300,
+			Redis: engineconfig.RedisConfig{
+				Address:   "localhost:6379",
+				KeyPrefix: "test",
+			},
+		},
+	}
+	config.ResetServerRuntime()
+	err := config.InitializeServerRuntime("/test/thunderid/home", mockConfig)
+	if err != nil {
+		suite.T().Fatal("Failed to initialize server runtime:", err)
+	}
+}
+
+func (suite *RedisCacheTestSuite) TearDownSuite() {
+	config.ResetServerRuntime()
+}
+
+func (suite *RedisCacheTestSuite) TestNewRedisCacheDisabled() {
+	t := suite.T()
+
+	cache := newRedisCache[string](
+		"TestDisabledCache",
+		false,
+		nil,
+		"test",
+		engineconfig.CacheConfig{TTL: 60},
+		engineconfig.CacheProperty{})
+
+	assert.NotNil(t, cache)
+	assert.False(t, cache.IsEnabled())
+	assert.Equal(t, "TestDisabledCache", cache.GetName())
+}
+
+func (suite *RedisCacheTestSuite) TestDisabledCacheOperations() {
+	t := suite.T()
+
+	cache := newRedisCache[string](
+		"TestDisabledOps",
+		false,
+		nil,
+		"test",
+		engineconfig.CacheConfig{TTL: 60},
+		engineconfig.CacheProperty{})
+
+	// Set should be a no-op
+	err := cache.Set(context.Background(), CacheKey{Key: "testKey"}, "testValue")
+	assert.NoError(t, err)
+
+	// Get should return zero value and false
+	val, found := cache.Get(context.Background(), CacheKey{Key: "testKey"})
+	assert.False(t, found)
+	assert.Empty(t, val)
+
+	// Delete should be a no-op
+	err = cache.Delete(context.Background(), CacheKey{Key: "testKey"})
+	assert.NoError(t, err)
+}
+
+func (suite *RedisCacheTestSuite) TestDisabledCacheStats() {
+	t := suite.T()
+
+	cache := newRedisCache[string]("TestDisabledStats",
+		false,
+		nil,
+		"test",
+		engineconfig.CacheConfig{TTL: 60},
+		engineconfig.CacheProperty{})
+
+	stats := cache.GetStats()
+	assert.False(t, stats.Enabled)
+}
+
+func (suite *RedisCacheTestSuite) TestCleanupExpiredIsNoOp() {
+	t := suite.T()
+
+	cache := newRedisCache[string]("TestCleanupExpired",
+		false,
+		nil,
+		"test",
+		engineconfig.CacheConfig{TTL: 60},
+		engineconfig.CacheProperty{})
+
+	// CleanupExpired is a no-op for Redis as TTL-based expiry is handled natively
+	assert.NotPanics(t, func() {
+		cache.CleanupExpired()
+	})
+}
+
+func (suite *RedisCacheTestSuite) TestBuildKey() {
+	t := suite.T()
+
+	cache := &redisCache[string]{
+		enabled:   true,
+		name:      "TestCache",
+		keyPrefix: "thunderid",
+	}
+
+	key := cache.buildKey(CacheKey{Key: "myKey"})
+	assert.Equal(t, "thunderid:TestCache:myKey", key)
+}
+
+func (suite *RedisCacheTestSuite) TestBuildKeyWithEmptyPrefix() {
+	t := suite.T()
+
+	cache := &redisCache[string]{
+		enabled:   true,
+		name:      "TestCache",
+		keyPrefix: "",
+	}
+
+	key := cache.buildKey(CacheKey{Key: "myKey"})
+	assert.Equal(t, ":TestCache:myKey", key)
+}
+
+func (suite *RedisCacheTestSuite) TestGetCacheTypeRedis() {
+	t := suite.T()
+
+	cacheConfig := engineconfig.CacheConfig{
+		Type: "redis",
+	}
+	assert.Equal(t, cacheTypeRedis, getCacheType(cacheConfig))
+}
+
+func (suite *RedisCacheTestSuite) TestGetCacheTypeInMemory() {
+	t := suite.T()
+
+	cacheConfig := engineconfig.CacheConfig{
+		Type: "inmemory",
+	}
+	assert.Equal(t, cacheTypeInMemory, getCacheType(cacheConfig))
+}
+
+func (suite *RedisCacheTestSuite) TestGetCacheTypeEmpty() {
+	t := suite.T()
+
+	cacheConfig := engineconfig.CacheConfig{
+		Type: "",
+	}
+	assert.Equal(t, cacheTypeInMemory, getCacheType(cacheConfig))
+}
+
+func (suite *RedisCacheTestSuite) TestGetCacheTypeUnknown() {
+	t := suite.T()
+
+	cacheConfig := engineconfig.CacheConfig{
+		Type: "memcached",
+	}
+	assert.Equal(t, cacheTypeInMemory, getCacheType(cacheConfig))
+}

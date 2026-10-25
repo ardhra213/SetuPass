@@ -1,0 +1,105 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Package common defines the common models and functions for authentication handling.
+package common
+
+import (
+	"context"
+	"time"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+// AuthenticatedUser represents the user information of an authenticated user.
+type AuthenticatedUser struct {
+	IsAuthenticated     bool
+	UserID              string
+	OUID                string
+	UserType            string
+	Attributes          map[string]interface{}
+	AvailableAttributes *providers.AttributesResponse
+	Token               string
+}
+
+// AuthenticationContext represents the context of an authentication session.
+type AuthenticationContext struct {
+	context.Context
+	SessionDataKey     string
+	RequestQueryParams map[string]string
+	AuthenticatedUser  AuthenticatedUser
+	AuthTime           time.Time
+}
+
+// AuthenticationResponse represents the response after successful authentication.
+type AuthenticationResponse struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	OUID      string `json:"ouId"`
+	Assertion string `json:"assertion,omitempty"`
+}
+
+// AuthenticatorMeta represents an authenticator's metadata including authentication factors.
+type AuthenticatorMeta struct {
+	// Name is the unique identifier for the authenticator (used in individual authentication APIs)
+	Name string
+	// Factors represents the authentication factors this authenticator validates
+	Factors []AuthenticationFactor
+	// AssociatedIDP is the optional identity provider type this authenticator is associated with.
+	AssociatedIDP providers.IDPType
+}
+
+// AuthenticatorReference represents an engaged authenticator in the authentication flow.
+type AuthenticatorReference struct {
+	// Authenticator is the name of the authenticator
+	Authenticator string `json:"authenticator"`
+	// Step is the step number in the flow where this authenticator was engaged
+	Step int `json:"step"`
+	// Timestamp is the authenticator engaged time (Unix epoch time in seconds)
+	Timestamp int64 `json:"timestamp"`
+}
+
+// AuthorizationData holds authorization flow parameters exchanged during federated authentication.
+type AuthorizationData struct {
+	// Code is the authorization code received from the identity provider
+	Code string
+	// Nonce is the nonce parameter received from the identity provider (if applicable)
+	Nonce string
+}
+
+// FederatedAuthCredential carries the credential data for federated authentication.
+type FederatedAuthCredential struct {
+	IDPID             string
+	IDPType           providers.IDPType
+	AuthorizationData AuthorizationData
+}
+
+// OpenID4VPCredential carries the verified presentation result to the authn provider.
+type OpenID4VPCredential struct {
+	Subject string
+	Claims  map[string]interface{}
+}
+
+// FederatedAuthResult is the result of a federated authentication attempt.
+// InternalEntity is nil when no local user was found or when the user is ambiguous.
+type FederatedAuthResult struct {
+	Sub             string
+	Claims          map[string]interface{}
+	InternalEntity  *providers.Entity
+	IsAmbiguousUser bool
+}
+
+// FederatedAuthenticator defines the interface for federated authentication services.
+// Authenticate performs the full flow (code exchange, claims extraction, internal user lookup).
+// It returns an error only for actual failures; a missing internal user is NOT an error.
+type FederatedAuthenticator interface {
+	Authenticate(ctx context.Context, idpID string, authzData AuthorizationData) (*AuthnResult, *tidcommon.ServiceError)
+}
+
+// AuthnResult represents the result of an authentication attempt,
+// including the issued token and any authenticated claims.
+type AuthnResult struct {
+	Token               map[string]interface{} `json:"token"`
+	AuthenticatedClaims map[string]interface{} `json:"authenticatedClaims,omitempty"`
+}

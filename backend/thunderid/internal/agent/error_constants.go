@@ -1,0 +1,518 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package agent
+
+import (
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+)
+
+// Client errors for agent operations. Codes follow the AGT-* convention from api/agent.yaml.
+var (
+	// ErrorInvalidRequestFormat is returned when the request body cannot be decoded.
+	ErrorInvalidRequestFormat = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1001",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_request_format",
+			DefaultValue: "Invalid request format",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_request_format_description",
+			DefaultValue: "The request body is malformed or contains invalid data",
+		},
+	}
+
+	// ErrorInvalidRedirectURI is returned when a redirect URI fails validation.
+	ErrorInvalidRedirectURI = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1002",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_redirect_uri",
+			DefaultValue: "Invalid redirect URI",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_redirect_uri_description",
+			DefaultValue: "One or more redirect URIs are not valid",
+		},
+	}
+
+	// ErrorInvalidGrantType is returned when an unsupported grant type is requested.
+	ErrorInvalidGrantType = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1003",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_grant_type",
+			DefaultValue: "Invalid grant type",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_grant_type_description",
+			DefaultValue: "One or more grant types are not supported",
+		},
+	}
+
+	// ErrorAgentNotFound is returned when no agent exists with the given identifier.
+	ErrorAgentNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1004",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.agent_not_found",
+			DefaultValue: "Agent not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.agent_not_found_description",
+			DefaultValue: "The agent with the specified id does not exist",
+		},
+	}
+
+	// ErrorOrganizationUnitNotFound is returned when the target OU cannot be resolved.
+	ErrorOrganizationUnitNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1005",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.organization_unit_not_found",
+			DefaultValue: "Organization unit not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.organization_unit_not_found_description",
+			DefaultValue: "The specified organization unit does not exist",
+		},
+	}
+
+	// ErrorMissingAgentID is returned when the path id is empty.
+	ErrorMissingAgentID = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1008",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.missing_agent_id",
+			DefaultValue: "Missing agent ID",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.missing_agent_id_description",
+			DefaultValue: "The agent ID is required",
+		},
+	}
+
+	// ErrorInvalidAgentName is returned when name is empty.
+	ErrorInvalidAgentName = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1009",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_agent_name",
+			DefaultValue: "Invalid agent name",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_agent_name_description",
+			DefaultValue: "The agent name must be provided and non-empty",
+		},
+	}
+
+	// ErrorInvalidAgentType is returned when type is empty.
+	ErrorInvalidAgentType = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1010",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_agent_type",
+			DefaultValue: "Invalid agent type",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_agent_type_description",
+			DefaultValue: "The agent type must be provided",
+		},
+	}
+
+	// ErrorInvalidLimit is returned for invalid pagination limit.
+	ErrorInvalidLimit = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1011",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_limit",
+			DefaultValue: "Invalid pagination parameter",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_limit_description",
+			DefaultValue: "The limit parameter must be between 1 and 100",
+		},
+	}
+
+	// ErrorInvalidOffset is returned for invalid pagination offset.
+	ErrorInvalidOffset = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1012",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_offset",
+			DefaultValue: "Invalid pagination parameter",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_offset_description",
+			DefaultValue: "The offset parameter must be a non-negative integer",
+		},
+	}
+
+	// ErrorAgentAlreadyExistsWithName is returned when another agent already has the same name.
+	ErrorAgentAlreadyExistsWithName = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1013",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.agent_already_exists_with_name",
+			DefaultValue: "Agent already exists",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.agent_already_exists_with_name_description",
+			DefaultValue: "An agent with the same name already exists",
+		},
+	}
+
+	// ErrorAttributeConflict is returned when a unique attribute clashes with another entity.
+	ErrorAttributeConflict = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1014",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.attribute_conflict",
+			DefaultValue: "Attribute conflict",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.attribute_conflict_description",
+			DefaultValue: "An agent with the same unique attribute value already exists",
+		},
+	}
+
+	// ErrorSchemaValidationFailed is returned when agent attributes fail schema validation.
+	ErrorSchemaValidationFailed = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1015",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.schema_validation_failed",
+			DefaultValue: "Schema validation failed",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.schema_validation_failed_description",
+			DefaultValue: "The provided attributes failed schema validation",
+		},
+	}
+
+	// ErrorInvalidCredential is returned when a supplied credential is invalid.
+	ErrorInvalidCredential = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1016",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_credential",
+			DefaultValue: "Invalid credential",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_credential_description",
+			DefaultValue: "The provided credential is invalid",
+		},
+	}
+
+	// ErrorInvalidFilter is returned when the filter query parameter is malformed.
+	ErrorInvalidFilter = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1020",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_filter",
+			DefaultValue: "Invalid filter parameter",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_filter_description",
+			DefaultValue: "The filter format is invalid",
+		},
+	}
+
+	// ErrorInvalidOAuthConfiguration is returned for generic OAuth configuration validation failures.
+	ErrorInvalidOAuthConfiguration = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1021",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_oauth_configuration",
+			DefaultValue: "Invalid OAuth configuration",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_oauth_configuration_description",
+			DefaultValue: "The provided OAuth configuration is invalid",
+		},
+	}
+
+	// ErrorInvalidTokenEndpointAuthMethod is returned when the token endpoint auth method is not supported.
+	ErrorInvalidTokenEndpointAuthMethod = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1022",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_token_endpoint_auth_method",
+			DefaultValue: "Invalid token endpoint authentication method",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_token_endpoint_auth_method_description",
+			DefaultValue: "The provided token endpoint authentication method is not supported",
+		},
+	}
+
+	// ErrorInvalidPublicClientConfiguration is returned for public client misconfiguration.
+	ErrorInvalidPublicClientConfiguration = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1023",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_public_client_configuration",
+			DefaultValue: "Invalid public client configuration",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_public_client_configuration_description",
+			DefaultValue: "The public client configuration is invalid",
+		},
+	}
+
+	// ErrorInvalidCertificateType is returned when the certificate type is not supported.
+	ErrorInvalidCertificateType = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1024",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_certificate_type",
+			DefaultValue: "Invalid certificate type",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_certificate_type_description",
+			DefaultValue: "The provided certificate type is not supported",
+		},
+	}
+
+	// ErrorInvalidCertificateValue is returned when the certificate value is malformed or missing.
+	ErrorInvalidCertificateValue = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1025",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_certificate_value",
+			DefaultValue: "Invalid certificate value",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_certificate_value_description",
+			DefaultValue: "The provided certificate value is invalid or missing",
+		},
+	}
+
+	// ErrorInvalidJWKSURI is returned when the JWKS URI is not a valid SSRF-safe HTTPS URL.
+	ErrorInvalidJWKSURI = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1026",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_jwks_uri",
+			DefaultValue: "Invalid JWKS URI",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_jwks_uri_description",
+			DefaultValue: "The JWKS URI must be a publicly reachable HTTPS URL",
+		},
+	}
+
+	// ErrorCannotModifyDeclarativeResource is returned when attempting to mutate a declaratively managed agent.
+	ErrorCannotModifyDeclarativeResource = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1027",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.cannot_modify_declarative_resource",
+			DefaultValue: "Cannot modify declarative resource",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.cannot_modify_declarative_resource_description",
+			DefaultValue: "Declaratively managed agents cannot be modified via the API",
+		},
+	}
+
+	// ErrorInvalidAuthFlowID is returned when the referenced auth flow does not exist.
+	ErrorInvalidAuthFlowID = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1028",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_auth_flow_id",
+			DefaultValue: "Invalid auth flow ID",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_auth_flow_id_description",
+			DefaultValue: "The provided authentication flow ID is invalid",
+		},
+	}
+
+	// ErrorInvalidRegistrationFlowID is returned when the referenced registration flow does not exist.
+	ErrorInvalidRegistrationFlowID = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1029",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_registration_flow_id",
+			DefaultValue: "Invalid registration flow ID",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_registration_flow_id_description",
+			DefaultValue: "The provided registration flow ID is invalid",
+		},
+	}
+
+	// ErrorWhileRetrievingFlowDefinition is returned when the flow definition cannot be fetched.
+	ErrorWhileRetrievingFlowDefinition = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1030",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.error_retrieving_flow_definition",
+			DefaultValue: "Error retrieving flow definition",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.error_retrieving_flow_definition_description",
+			DefaultValue: "An error occurred while retrieving the flow definition",
+		},
+	}
+
+	// ErrorInvalidUserType is returned when an allowed user type does not exist.
+	ErrorInvalidUserType = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1031",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_user_type",
+			DefaultValue: "Invalid user type",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_user_type_description",
+			DefaultValue: "One or more specified allowed user types are invalid",
+		},
+	}
+
+	// ErrorThemeNotFound is returned when the referenced theme does not exist.
+	ErrorThemeNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1032",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.theme_not_found",
+			DefaultValue: "Theme not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.theme_not_found_description",
+			DefaultValue: "The specified theme does not exist",
+		},
+	}
+
+	// ErrorLayoutNotFound is returned when the referenced layout does not exist.
+	ErrorLayoutNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1033",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.layout_not_found",
+			DefaultValue: "Layout not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.layout_not_found_description",
+			DefaultValue: "The specified layout does not exist",
+		},
+	}
+
+	// ErrorInvalidResponseType is returned when an unsupported response type is supplied.
+	ErrorInvalidResponseType = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1034",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_response_type",
+			DefaultValue: "Invalid response type",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_response_type_description",
+			DefaultValue: "One or more provided response types are invalid",
+		},
+	}
+
+	// ErrorCertificateClientError is returned when a certificate operation fails due to a client error.
+	ErrorCertificateClientError = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1036",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.certificate_operation_failed",
+			DefaultValue: "Certificate operation failed",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.certificate_operation_failed_description",
+			DefaultValue: "A certificate operation failed due to invalid input",
+		},
+	}
+
+	// ErrorAgentAlreadyExistsWithClientID is returned when another entity already uses the supplied client ID.
+	ErrorAgentAlreadyExistsWithClientID = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1037",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.agent_already_exists_with_client_id",
+			DefaultValue: "Client ID already in use",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.agent_already_exists_with_client_id_description",
+			DefaultValue: "An entity with the same client ID already exists",
+		},
+	}
+
+	// ErrorMultipleOAuthConfigs is returned when more than one OAuth inbound auth config is supplied.
+	ErrorMultipleOAuthConfigs = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1038",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.multiple_oauth_configs",
+			DefaultValue: "Multiple OAuth inbound auth configs are not allowed",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.multiple_oauth_configs_description",
+			DefaultValue: "An entity may have at most one inbound auth config per protocol",
+		},
+	}
+
+	// ErrorOwnerNotFound is returned when the supplied owner identifier does not resolve to a known entity.
+	ErrorOwnerNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1039",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.owner_not_found",
+			DefaultValue: "Owner not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.owner_not_found_description",
+			DefaultValue: "The specified owner does not match any known user, application, or agent",
+		},
+	}
+
+	// ErrorInvalidUserAttribute is returned when a user attribute is not valid for any
+	// of the agent's allowed user types.
+	ErrorInvalidUserAttribute = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1040",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_user_attribute",
+			DefaultValue: "Invalid user attribute",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_user_attribute_description",
+			DefaultValue: "One or more user attributes are not valid for the configured allowed user types",
+		},
+	}
+
+	// ErrorInvalidLogoURL is returned when the supplied logo URL fails validation.
+	ErrorInvalidLogoURL = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1041",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_logo_url",
+			DefaultValue: "Invalid logo URL",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_logo_url_description",
+			DefaultValue: "The provided logo URL is not valid",
+		},
+	}
+
+	// ErrorInvalidSubjectAttributeMapping is returned when the subject attribute mapping references an
+	// attribute that is not unique, required, and string-typed in an allowed agent type.
+	ErrorInvalidSubjectAttributeMapping = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AGT-1042",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.agentservice.invalid_subject_attribute_mapping",
+			DefaultValue: "Invalid subject attribute mapping",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key: "error.agentservice.invalid_subject_attribute_mapping_description",
+			DefaultValue: "The subject attribute mapping must reference an attribute that is unique, required, " +
+				"and string-typed in an allowed agent type",
+		},
+	}
+)

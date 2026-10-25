@@ -1,0 +1,109 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package notification
+
+import (
+	"context"
+	"errors"
+
+	"github.com/thunder-id/thunderid/internal/notification/common"
+	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
+	"github.com/thunder-id/thunderid/internal/system/declarative_resource/entity"
+	"github.com/thunder-id/thunderid/internal/system/transaction"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+type notificationFileBasedStore struct {
+	*declarativeresource.GenericFileBasedStore
+}
+
+// Create implements declarativeresource.Storer interface for resource loader
+func (f *notificationFileBasedStore) Create(id string, data interface{}) error {
+	sender := data.(*common.NotificationSenderDTO)
+	return f.createSender(context.Background(), *sender)
+}
+
+// createSender implements notificationStoreInterface.
+func (f *notificationFileBasedStore) createSender(ctx context.Context, sender common.NotificationSenderDTO) error {
+	return f.GenericFileBasedStore.Create(sender.ID, &sender)
+}
+
+// deleteSender implements notificationStoreInterface.
+func (f *notificationFileBasedStore) deleteSender(ctx context.Context, id string) error {
+	return errors.New("deleteSender is not supported in file-based store")
+}
+
+// getSenderByID implements notificationStoreInterface.
+func (f *notificationFileBasedStore) getSenderByID(
+	ctx context.Context, id string) (*common.NotificationSenderDTO, error) {
+	data, err := f.GenericFileBasedStore.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	sender, ok := data.(*common.NotificationSenderDTO)
+	if !ok {
+		declarativeresource.LogTypeAssertionError("notification sender", id)
+		return nil, errors.New("notification sender data corrupted")
+	}
+	return sender, nil
+}
+
+// getSenderByName implements notificationStoreInterface.
+func (f *notificationFileBasedStore) getSenderByName(
+	ctx context.Context, name string) (*common.NotificationSenderDTO, error) {
+	data, err := f.GenericFileBasedStore.GetByField(name, func(d interface{}) string {
+		return d.(*common.NotificationSenderDTO).Name
+	})
+	if err != nil {
+		return nil, nil // Return nil for not found to match original behavior
+	}
+	return data.(*common.NotificationSenderDTO), nil
+}
+
+// listSenders implements notificationStoreInterface.
+func (f *notificationFileBasedStore) listSenders(ctx context.Context) ([]common.NotificationSenderDTO, error) {
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	senderList := make([]common.NotificationSenderDTO, 0)
+	for _, item := range list {
+		if sender, ok := item.Data.(*common.NotificationSenderDTO); ok {
+			senderList = append(senderList, *sender)
+		}
+	}
+	return senderList, nil
+}
+
+// listSendersByType implements notificationStoreInterface.
+func (f *notificationFileBasedStore) listSendersByType(
+	ctx context.Context, senderType common.NotificationSenderType) ([]common.NotificationSenderDTO, error) {
+	all, err := f.listSenders(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	senderList := make([]common.NotificationSenderDTO, 0)
+	for _, sender := range all {
+		if sender.Type == senderType {
+			senderList = append(senderList, sender)
+		}
+	}
+	return senderList, nil
+}
+
+// updateSender implements notificationStoreInterface.
+func (f *notificationFileBasedStore) updateSender(
+	ctx context.Context, id string, sender common.NotificationSenderDTO) error {
+	return errors.New("updateSender is not supported in file-based store")
+}
+
+// newNotificationFileBasedStore creates a new instance of a file-based store.
+func newNotificationFileBasedStore() (notificationStoreInterface, providers.Transactioner) {
+	genericStore := declarativeresource.NewGenericFileBasedStore(entity.KeyTypeNotificationSender)
+	return &notificationFileBasedStore{
+		GenericFileBasedStore: genericStore,
+	}, transaction.NewNoOpTransactioner()
+}

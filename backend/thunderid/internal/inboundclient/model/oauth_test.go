@@ -1,0 +1,670 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package model_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+
+	sysconfig "github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+const (
+	errRedirectURIFragment          = "redirect URI must not contain a fragment component"
+	errRedirectURINotRegistered     = "your application's redirect URL does not match with the registered redirect URLs"
+	errRedirectURIRequired          = "redirect URI is required in the authorization request"
+	errRedirectURINotFullyQualified = "registered redirect URI is not fully qualified"
+)
+
+type OAuthClientTestSuite struct {
+	suite.Suite
+}
+
+func TestOAuthClientTestSuite(t *testing.T) {
+	suite.Run(t, new(OAuthClientTestSuite))
+}
+
+func (suite *OAuthClientTestSuite) SetupTest() {
+	sysconfig.ResetServerRuntime()
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", &sysconfig.Config{}))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_AuthorizationCode() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeAuthorizationCode,
+			providers.GrantTypeRefreshToken,
+		},
+	}
+
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeAuthorizationCode))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_ClientCredentials() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeClientCredentials,
+		},
+	}
+
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeClientCredentials))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_RefreshToken() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeRefreshToken,
+		},
+	}
+
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeRefreshToken))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_TokenExchange() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeTokenExchange,
+		},
+	}
+
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeTokenExchange))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_NotAllowed() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeAuthorizationCode,
+		},
+	}
+
+	suite.False(c.IsAllowedGrantType(providers.GrantTypeClientCredentials))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_EmptyGrantType() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeAuthorizationCode,
+		},
+	}
+
+	suite.False(c.IsAllowedGrantType(""))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_EmptyGrantTypesList() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{},
+	}
+
+	suite.False(c.IsAllowedGrantType(providers.GrantTypeAuthorizationCode))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_NilGrantTypesList() {
+	c := &providers.OAuthClient{
+		GrantTypes: nil,
+	}
+
+	suite.False(c.IsAllowedGrantType(providers.GrantTypeAuthorizationCode))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedGrantType_MultipleGrantTypes() {
+	c := &providers.OAuthClient{
+		GrantTypes: []providers.GrantType{
+			providers.GrantTypeAuthorizationCode,
+			providers.GrantTypeClientCredentials,
+			providers.GrantTypeRefreshToken,
+			providers.GrantTypeTokenExchange,
+		},
+	}
+
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeAuthorizationCode))
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeClientCredentials))
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeRefreshToken))
+	suite.True(c.IsAllowedGrantType(providers.GrantTypeTokenExchange))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedResponseType_Code() {
+	c := &providers.OAuthClient{
+		ResponseTypes: []providers.ResponseType{
+			providers.ResponseTypeCode,
+		},
+	}
+
+	suite.True(c.IsAllowedResponseType("code"))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedResponseType_NotAllowed() {
+	c := &providers.OAuthClient{
+		ResponseTypes: []providers.ResponseType{
+			providers.ResponseTypeCode,
+		},
+	}
+
+	suite.False(c.IsAllowedResponseType("token"))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedResponseType_EmptyResponseType() {
+	c := &providers.OAuthClient{
+		ResponseTypes: []providers.ResponseType{
+			providers.ResponseTypeCode,
+		},
+	}
+
+	suite.False(c.IsAllowedResponseType(""))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedResponseType_EmptyResponseTypesList() {
+	c := &providers.OAuthClient{
+		ResponseTypes: []providers.ResponseType{},
+	}
+
+	suite.False(c.IsAllowedResponseType("code"))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedResponseType_NilResponseTypesList() {
+	c := &providers.OAuthClient{
+		ResponseTypes: nil,
+	}
+
+	suite.False(c.IsAllowedResponseType("code"))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedResponseType_MultipleResponseTypes() {
+	c := &providers.OAuthClient{
+		ResponseTypes: []providers.ResponseType{
+			providers.ResponseTypeCode,
+			"token",
+			"id_token",
+		},
+	}
+
+	suite.True(c.IsAllowedResponseType("code"))
+	suite.True(c.IsAllowedResponseType("token"))
+	suite.True(c.IsAllowedResponseType("id_token"))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedTokenEndpointAuthMethod_ClientSecretBasic() {
+	c := &providers.OAuthClient{
+		TokenEndpointAuthMethod: providers.TokenEndpointAuthMethodClientSecretBasic,
+	}
+
+	suite.True(c.IsAllowedTokenEndpointAuthMethod(providers.TokenEndpointAuthMethodClientSecretBasic))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedTokenEndpointAuthMethod_ClientSecretPost() {
+	c := &providers.OAuthClient{
+		TokenEndpointAuthMethod: providers.TokenEndpointAuthMethodClientSecretPost,
+	}
+
+	suite.True(c.IsAllowedTokenEndpointAuthMethod(providers.TokenEndpointAuthMethodClientSecretPost))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedTokenEndpointAuthMethod_None() {
+	c := &providers.OAuthClient{
+		TokenEndpointAuthMethod: providers.TokenEndpointAuthMethodNone,
+	}
+
+	suite.True(c.IsAllowedTokenEndpointAuthMethod(providers.TokenEndpointAuthMethodNone))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedTokenEndpointAuthMethod_NotAllowed() {
+	c := &providers.OAuthClient{
+		TokenEndpointAuthMethod: providers.TokenEndpointAuthMethodClientSecretBasic,
+	}
+
+	suite.False(c.IsAllowedTokenEndpointAuthMethod(providers.TokenEndpointAuthMethodClientSecretPost))
+}
+
+func (suite *OAuthClientTestSuite) TestIsAllowedTokenEndpointAuthMethod_Empty() {
+	c := &providers.OAuthClient{
+		TokenEndpointAuthMethod: providers.TokenEndpointAuthMethodClientSecretBasic,
+	}
+
+	suite.False(c.IsAllowedTokenEndpointAuthMethod(""))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_ValidWithSingleRegisteredURI() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"https://example.com/callback"},
+	}
+
+	suite.NoError(c.ValidateRedirectURI(context.Background(), "https://example.com/callback"))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_ValidHTTPLocalhostWithPort() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"http://localhost:3000/callback"},
+	}
+
+	suite.NoError(c.ValidateRedirectURI(context.Background(), "http://localhost:3000/callback"))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_ValidHTTPSWithPath() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"https://app.example.com/oauth/callback"},
+	}
+
+	suite.NoError(c.ValidateRedirectURI(context.Background(), "https://app.example.com/oauth/callback"))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_ValidCustomScheme() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"myapp://callback"},
+	}
+
+	suite.NoError(c.ValidateRedirectURI(context.Background(), "myapp://callback"))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_ValidWithQueryParameters() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"https://example.com/callback?param=value"},
+	}
+
+	suite.NoError(c.ValidateRedirectURI(context.Background(), "https://example.com/callback?param=value"))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_InvalidWithFragment() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"https://example.com/callback#fragment"},
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "https://example.com/callback#fragment")
+	suite.EqualError(err, errRedirectURIFragment)
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_NotRegistered() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"https://example.com/callback"},
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "https://different.com/callback")
+	suite.EqualError(err, errRedirectURINotRegistered)
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_EmptyWithSingleFullyQualifiedURI() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"https://example.com/callback"},
+	}
+
+	suite.NoError(c.ValidateRedirectURI(context.Background(), ""))
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_EmptyWithMultipleURIs() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{
+			"https://example.com/callback",
+			"https://example.com/callback2",
+		},
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "")
+	suite.EqualError(err, errRedirectURIRequired)
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_EmptyWithPartialRegisteredURI() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"/callback"},
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "")
+	suite.EqualError(err, errRedirectURINotFullyQualified)
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_EmptyWithInvalidRegisteredURI() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{"://invalid"},
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "")
+	suite.EqualError(err, errRedirectURINotFullyQualified)
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_EmptyRedirectURIsList() {
+	c := &providers.OAuthClient{
+		RedirectURIs: []string{},
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "")
+	suite.EqualError(err, errRedirectURIRequired)
+}
+
+func (suite *OAuthClientTestSuite) TestValidateRedirectURI_NilRedirectURIsList() {
+	c := &providers.OAuthClient{
+		RedirectURIs: nil,
+	}
+
+	err := c.ValidateRedirectURI(context.Background(), "")
+	suite.EqualError(err, errRedirectURIRequired)
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPKCE_PKCERequiredTrue() {
+	c := &providers.OAuthClient{PKCERequired: true, PublicClient: false}
+	suite.True(c.RequiresPKCE())
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPKCE_PublicClientTrue() {
+	c := &providers.OAuthClient{PKCERequired: false, PublicClient: true}
+	suite.True(c.RequiresPKCE())
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPKCE_BothTrue() {
+	c := &providers.OAuthClient{PKCERequired: true, PublicClient: true}
+	suite.True(c.RequiresPKCE())
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPKCE_BothFalse() {
+	c := &providers.OAuthClient{PKCERequired: false, PublicClient: false}
+	suite.False(c.RequiresPKCE())
+}
+
+type OAuthHelperTestSuite struct {
+	suite.Suite
+}
+
+func TestOAuthHelperTestSuite(t *testing.T) {
+	suite.Run(t, new(OAuthHelperTestSuite))
+}
+
+func (suite *OAuthHelperTestSuite) SetupTest() {
+	sysconfig.ResetServerRuntime()
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", &sysconfig.Config{}))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedGrantType_ValidGrantType() {
+	grantTypes := []providers.GrantType{
+		providers.GrantTypeAuthorizationCode,
+		providers.GrantTypeRefreshToken,
+	}
+
+	suite.True(providers.IsAllowedGrantType(grantTypes, providers.GrantTypeAuthorizationCode))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedGrantType_InvalidGrantType() {
+	grantTypes := []providers.GrantType{
+		providers.GrantTypeAuthorizationCode,
+	}
+
+	suite.False(providers.IsAllowedGrantType(grantTypes, providers.GrantTypeClientCredentials))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedGrantType_EmptyGrantType() {
+	grantTypes := []providers.GrantType{
+		providers.GrantTypeAuthorizationCode,
+	}
+
+	suite.False(providers.IsAllowedGrantType(grantTypes, ""))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedGrantType_EmptyList() {
+	suite.False(providers.IsAllowedGrantType([]providers.GrantType{}, providers.GrantTypeAuthorizationCode))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedGrantType_NilList() {
+	suite.False(providers.IsAllowedGrantType(nil, providers.GrantTypeAuthorizationCode))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedResponseType_ValidResponseType() {
+	responseTypes := []providers.ResponseType{
+		providers.ResponseTypeCode,
+		"token",
+	}
+
+	suite.True(providers.IsAllowedResponseType(responseTypes, "code"))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedResponseType_InvalidResponseType() {
+	responseTypes := []providers.ResponseType{
+		providers.ResponseTypeCode,
+	}
+
+	suite.False(providers.IsAllowedResponseType(responseTypes, "token"))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedResponseType_EmptyResponseType() {
+	responseTypes := []providers.ResponseType{
+		providers.ResponseTypeCode,
+	}
+
+	suite.False(providers.IsAllowedResponseType(responseTypes, ""))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedResponseType_EmptyList() {
+	suite.False(providers.IsAllowedResponseType([]providers.ResponseType{}, "code"))
+}
+
+func (suite *OAuthHelperTestSuite) TestIsAllowedResponseType_NilList() {
+	suite.False(providers.IsAllowedResponseType(nil, "code"))
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_ValidSingleURI() {
+	err := providers.ValidateRedirectURI(
+		context.Background(),
+		[]string{"https://example.com/callback"},
+		"https://example.com/callback")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_ValidMultipleURIs() {
+	redirectURIs := []string{
+		"https://example.com/callback",
+		"https://example.com/callback2",
+	}
+
+	err := providers.ValidateRedirectURI(context.Background(), redirectURIs, "https://example.com/callback2")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_InvalidNotRegistered() {
+	err := providers.ValidateRedirectURI(
+		context.Background(),
+		[]string{"https://example.com/callback"},
+		"https://different.com/callback")
+	suite.EqualError(err, errRedirectURINotRegistered)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_InvalidWithFragment() {
+	uri := "https://example.com/callback#fragment"
+	err := providers.ValidateRedirectURI(context.Background(), []string{uri}, uri)
+	suite.EqualError(err, errRedirectURIFragment)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_EmptyURIWithSingleFullyQualified() {
+	err := providers.ValidateRedirectURI(context.Background(), []string{"https://example.com/callback"}, "")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_EmptyURIWithMultiple() {
+	redirectURIs := []string{
+		"https://example.com/callback",
+		"https://example.com/callback2",
+	}
+
+	err := providers.ValidateRedirectURI(context.Background(), redirectURIs, "")
+	suite.EqualError(err, errRedirectURIRequired)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_EmptyURIWithPartialRegistered() {
+	err := providers.ValidateRedirectURI(context.Background(), []string{"/callback"}, "")
+	suite.EqualError(err, errRedirectURINotFullyQualified)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_EmptyURIWithNoScheme() {
+	err := providers.ValidateRedirectURI(context.Background(), []string{"example.com/callback"}, "")
+	suite.EqualError(err, errRedirectURINotFullyQualified)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_EmptyURIWithNoHost() {
+	err := providers.ValidateRedirectURI(context.Background(), []string{"https:///callback"}, "")
+	suite.EqualError(err, errRedirectURINotFullyQualified)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_EmptyURIList() {
+	err := providers.ValidateRedirectURI(context.Background(), []string{}, "")
+	suite.EqualError(err, errRedirectURIRequired)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_NilList() {
+	err := providers.ValidateRedirectURI(context.Background(), nil, "")
+	suite.EqualError(err, errRedirectURIRequired)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_CustomScheme() {
+	err := providers.ValidateRedirectURI(context.Background(), []string{"myapp://callback"}, "myapp://callback")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_LocalhostHTTP() {
+	err := providers.ValidateRedirectURI(
+		context.Background(),
+		[]string{"http://localhost:3000/callback"},
+		"http://localhost:3000/callback")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_WithQueryParams() {
+	uri := "https://example.com/callback?foo=bar"
+	suite.NoError(providers.ValidateRedirectURI(context.Background(), []string{uri}, uri))
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_IPAddress() {
+	err := providers.ValidateRedirectURI(
+		context.Background(),
+		[]string{"https://192.168.1.1/callback"},
+		"https://192.168.1.1/callback")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_Localhost127() {
+	err := providers.ValidateRedirectURI(
+		context.Background(),
+		[]string{"http://127.0.0.1:8080/callback"},
+		"http://127.0.0.1:8080/callback")
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestValidateRedirectURI_InvalidURLFormat() {
+	uri := "http://example.com/callback\x00invalid"
+	err := providers.ValidateRedirectURI(context.Background(), []string{uri}, uri)
+	suite.Error(err)
+	assert.Contains(suite.T(), err.Error(), "invalid redirect URI")
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPAR_GlobalConfigEnabled() {
+	sysconfig.ResetServerRuntime()
+	cfg := &sysconfig.Config{}
+	cfg.OAuth.PAR.RequirePAR = true
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", cfg))
+
+	c := &providers.OAuthClient{RequirePushedAuthorizationRequests: false}
+	suite.True(c.RequiresPAR())
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPAR_PerClientEnabled() {
+	c := &providers.OAuthClient{RequirePushedAuthorizationRequests: true}
+	suite.True(c.RequiresPAR())
+}
+
+func (suite *OAuthClientTestSuite) TestRequiresPAR_BothFalse() {
+	c := &providers.OAuthClient{RequirePushedAuthorizationRequests: false}
+	suite.False(c.RequiresPAR())
+}
+
+func (suite *OAuthClientTestSuite) TestShouldAppendActorClaim() {
+	cases := []struct {
+		name            string
+		entityCategory  providers.EntityCategory
+		includeActClaim bool
+		expected        bool
+	}{
+		{name: "AgentFlagOff", entityCategory: providers.EntityCategoryAgent, includeActClaim: false, expected: true},
+		{name: "AgentFlagOn", entityCategory: providers.EntityCategoryAgent, includeActClaim: true, expected: true},
+		{name: "AppFlagOff", entityCategory: providers.EntityCategoryApp, includeActClaim: false, expected: false},
+		{name: "AppFlagOn", entityCategory: providers.EntityCategoryApp, includeActClaim: true, expected: true},
+		{name: "UserFlagOn", entityCategory: providers.EntityCategoryUser, includeActClaim: true, expected: false},
+		{name: "EmptyCategoryFlagOn", entityCategory: "", includeActClaim: true, expected: false},
+	}
+	for _, tc := range cases {
+		suite.Run(tc.name, func() {
+			c := &providers.OAuthClient{
+				EntityCategory:  tc.entityCategory,
+				IncludeActClaim: tc.includeActClaim,
+			}
+			suite.Equal(tc.expected, c.ShouldAppendActorClaim())
+		})
+	}
+}
+
+func (suite *OAuthHelperTestSuite) TestMatchAnyRedirectURIPattern_WildcardEnabled_Matches() {
+	sysconfig.ResetServerRuntime()
+	cfg := &sysconfig.Config{}
+	cfg.OAuth.AllowWildcardRedirectURI = true
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", cfg))
+
+	err := providers.ValidateRedirectURI(context.Background(),
+		[]string{"https://app.example.com/*"},
+		"https://app.example.com/cb",
+	)
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestMatchAnyRedirectURIPattern_WildcardDisabled_NoMatch() {
+	err := providers.ValidateRedirectURI(context.Background(),
+		[]string{"https://app.example.com/*"},
+		"https://app.example.com/cb",
+	)
+	suite.Error(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestMatchAnyRedirectURIPattern_HostWildcardEnabled_Matches() {
+	sysconfig.ResetServerRuntime()
+	cfg := &sysconfig.Config{}
+	cfg.OAuth.AllowWildcardRedirectURI = true
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", cfg))
+
+	err := providers.ValidateRedirectURI(context.Background(),
+		[]string{"https://tenant-app-*-*.gateway.example.com/cb"},
+		"https://tenant-app-019dfc78-f19ab4f2.gateway.example.com/cb",
+	)
+	suite.NoError(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestMatchAnyRedirectURIPattern_HostWildcardEnabled_NonMatchingDynamicPart() {
+	sysconfig.ResetServerRuntime()
+	cfg := &sysconfig.Config{}
+	cfg.OAuth.AllowWildcardRedirectURI = true
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", cfg))
+
+	// Hyphen inside the dynamic part is not in [0-9a-zA-Z]+, so this must fail.
+	err := providers.ValidateRedirectURI(context.Background(),
+		[]string{"https://app-*-prod.example.com/cb"},
+		"https://app-foo-bar-prod.example.com/cb",
+	)
+	suite.Error(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestMatchAnyRedirectURIPattern_HostWildcardDisabled_NoMatch() {
+	// Default: AllowWildcardRedirectURI = false. Note the pattern would never have made it
+	// past registration with the flag off, but we still verify the matcher returns no match.
+	err := providers.ValidateRedirectURI(context.Background(),
+		[]string{"https://app-*.example.com/cb"},
+		"https://app-prod.example.com/cb",
+	)
+	suite.Error(err)
+}
+
+func (suite *OAuthHelperTestSuite) TestMatchAnyRedirectURIPattern_HostWildcardDoesNotCrossDot() {
+	sysconfig.ResetServerRuntime()
+	cfg := &sysconfig.Config{}
+	cfg.OAuth.AllowWildcardRedirectURI = true
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", cfg))
+
+	err := providers.ValidateRedirectURI(context.Background(),
+		[]string{"https://app-*.example.com/cb"},
+		"https://app-foo.evil.example.com/cb",
+	)
+	suite.Error(err)
+}

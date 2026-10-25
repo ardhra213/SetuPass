@@ -1,0 +1,2717 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package export
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"text/template"
+
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	"github.com/thunder-id/thunderid/internal/application"
+	appmodel "github.com/thunder-id/thunderid/internal/application/model"
+	"github.com/thunder-id/thunderid/internal/connection"
+	"github.com/thunder-id/thunderid/internal/entitytype"
+	flowmgt "github.com/thunder-id/thunderid/internal/flow/mgt"
+	"github.com/thunder-id/thunderid/internal/idp"
+	inboundmodel "github.com/thunder-id/thunderid/internal/inboundclient/model"
+	"github.com/thunder-id/thunderid/internal/notification/common"
+	"github.com/thunder-id/thunderid/internal/system/cmodels"
+	"github.com/thunder-id/thunderid/internal/system/config"
+	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
+	"github.com/thunder-id/thunderid/tests/mocks/applicationmock"
+	"github.com/thunder-id/thunderid/tests/mocks/entitytypemock"
+	"github.com/thunder-id/thunderid/tests/mocks/flow/flowmgtmock"
+	"github.com/thunder-id/thunderid/tests/mocks/idp/idpmock"
+	"github.com/thunder-id/thunderid/tests/mocks/notification/notificationmock"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+)
+
+const (
+	testAppID     = "test-app-id"
+	testIDPID     = "test-idp-id"
+	testApp1ID    = "app1"
+	testApp2ID    = "app2"
+	testApp3ID    = "app3"
+	testAppTestID = "app-test-id"
+	testFlowID    = "test-flow-id"
+	testFlow1ID   = "flow1"
+	testFlow2ID   = "flow2"
+)
+
+// ExportServiceTestSuite defines the test suite for the export service.
+type ExportServiceTestSuite struct {
+	suite.Suite
+	appServiceMock          *applicationmock.ApplicationServiceInterfaceMock
+	idpServiceMock          *idpmock.IDPServiceInterfaceMock
+	mockNotificationService *notificationmock.NotificationSenderMgtSvcInterfaceMock
+	mockEntityTypeService   *entitytypemock.EntityTypeServiceInterfaceMock
+	mockFlowService         *flowmgtmock.FlowMgtServiceInterfaceMock
+	exportService           ExportServiceInterface
+}
+
+// SetupTest sets up the test environment before each test.
+func (suite *ExportServiceTestSuite) SetupTest() {
+	// Create temporary directory
+	tempDir := suite.T().TempDir()
+
+	// Initialize server runtime with declarative mode disabled
+	// Use just the filename since InitializeServerRuntime will prepend the base path
+	config.ResetServerRuntime()
+	testConfig := &config.Config{
+		Crypto: config.CryptoConfig{
+			Encryption: engineconfig.EncryptionConfig{
+				Key: "0579f866ac7c9273580d0ff163fa01a7b2401a7ff3ddc3e3b14ae3136fa6025e",
+			},
+		},
+		DeclarativeResources: config.DeclarativeResources{
+			Enabled: false,
+		},
+	}
+	_ = config.InitializeServerRuntime(tempDir, testConfig)
+
+	suite.appServiceMock = applicationmock.NewApplicationServiceInterfaceMock(suite.T())
+	suite.idpServiceMock = idpmock.NewIDPServiceInterfaceMock(suite.T())
+	suite.mockNotificationService = notificationmock.NewNotificationSenderMgtSvcInterfaceMock(suite.T())
+	suite.mockEntityTypeService = entitytypemock.NewEntityTypeServiceInterfaceMock(suite.T())
+	suite.mockFlowService = flowmgtmock.NewFlowMgtServiceInterfaceMock(suite.T())
+
+	// Create exporters
+	exporters := []declarativeresource.ResourceExporter{
+		application.NewApplicationExporterForTest(suite.appServiceMock),
+		connection.NewConnectionExporterForTest(suite.idpServiceMock, suite.mockNotificationService),
+		entitytype.NewEntityTypeExporterForTest(suite.mockEntityTypeService, entitytype.TypeCategoryUser),
+		flowmgt.NewFlowGraphExporterForTest(suite.mockFlowService),
+	}
+
+	// Create parameterizer instance
+	parameterizer := newParameterizer(templatingRules{})
+
+	suite.exportService = newExportService(exporters, parameterizer)
+}
+
+func (suite *ExportServiceTestSuite) TearDownTest() {
+	config.ResetServerRuntime()
+}
+
+// varNames returns a variable name allocator for tests that call
+// exportResourcesWithExporter directly instead of going through ExportResources.
+func (suite *ExportServiceTestSuite) varNames() *varNameAllocator {
+	return newVarNameAllocator(suite.exportService.(*exportService).parameterizer)
+}
+
+// TestExportServiceTestSuite runs the test suite.
+func TestExportServiceTestSuite(t *testing.T) {
+	suite.Run(t, new(ExportServiceTestSuite))
+}
+
+// TestExportResources_NilRequest tests ExportResources with nil request.
+func (suite *ExportServiceTestSuite) TestExportResources_NilRequest() {
+	result, err := suite.exportService.ExportResources(context.Background(), nil)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorInvalidRequest.Code, err.Code)
+	assert.Equal(suite.T(), "Invalid export request", err.Error.DefaultValue)
+}
+
+// TestExportResources_EmptyRequest tests ExportResources with empty request.
+func (suite *ExportServiceTestSuite) TestExportResources_EmptyRequest() {
+	request := &ExportRequest{}
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+	assert.Equal(suite.T(), "No resources found", err.Error.DefaultValue)
+}
+
+// TestExportResources_DefaultOptions tests ExportResources with default options.
+func (suite *ExportServiceTestSuite) TestExportResources_DefaultOptions() {
+	appID := testAppID
+	request := &ExportRequest{
+		Applications: []string{appID},
+	}
+
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "Test App",
+		Description: "Test Description",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.Nil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Summary.ResourceTypes, "application")
+	assert.Contains(suite.T(), result.Files[0].Content, "resource_type: application")
+}
+
+func (suite *ExportServiceTestSuite) TestAddResourceTypeField() {
+	content := "name: sample\n"
+	annotated := addResourceTypeField(content, "application")
+
+	assert.Equal(suite.T(), "resource_type: application\nname: sample\n", annotated)
+
+	annotatedAgain := addResourceTypeField(annotated, "application")
+	assert.Equal(suite.T(), annotated, annotatedAgain)
+}
+
+// TestExportResources_ApplicationNotFound tests ExportResources when application is not found.
+func (suite *ExportServiceTestSuite) TestExportResources_ApplicationNotFound() {
+	appID := "non-existent-app"
+	request := &ExportRequest{
+		Applications: []string{appID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(nil, appError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportResources_CompleteOAuthApplication tests exporting an application with OAuth config.
+func (suite *ExportServiceTestSuite) TestExportResources_CompleteOAuthApplication() {
+	appID := "oauth-app-id"
+	request := &ExportRequest{
+		Applications: []string{appID},
+		Options: &ExportOptions{
+			Format: "yaml",
+			FolderStructure: &FolderStructureOptions{
+				GroupByType:       true,
+				FileNamingPattern: "${name}_${id}",
+			},
+		},
+	}
+
+	mockOAuthConfig := &providers.OAuthConfigWithSecret{
+		ClientID:                "client123",
+		RedirectURIs:            []string{"http://localhost:3000/callback"},
+		GrantTypes:              []providers.GrantType{providers.GrantTypeAuthorizationCode},
+		ResponseTypes:           []providers.ResponseType{providers.ResponseTypeCode},
+		TokenEndpointAuthMethod: providers.TokenEndpointAuthMethodClientSecretPost,
+		PKCERequired:            true,
+		PublicClient:            false,
+		Scopes:                  []string{"openid", "profile"},
+		Token: &providers.OAuthTokenConfig{
+			AccessToken: &providers.AccessTokenConfig{
+				UserConfig: &providers.AccessTokenSubConfig{
+					ValidityPeriod: 3600,
+					Attributes:     []string{"email", "username"},
+				},
+			},
+			IDToken: &providers.IDTokenConfig{
+				ValidityPeriod: 1800,
+				UserAttributes: []string{"email"},
+			},
+		},
+		ScopeClaims: map[string][]string{
+			"profile": {"name", "picture"},
+		},
+	}
+
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "OAuth Test App",
+		Description: "OAuth Test Description",
+		URL:         "https://example.com",
+		InboundAuthConfig: []providers.InboundAuthConfigWithSecret{
+			{
+				Type:        providers.OAuthInboundAuthType,
+				OAuthConfig: mockOAuthConfig,
+			},
+		},
+		InboundAuthProfile: providers.InboundAuthProfile{
+			Assertion: &inboundmodel.AssertionConfig{
+				UserAttributes: []string{"email", "username"},
+			},
+		},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+
+	file := result.Files[0]
+	assert.Equal(suite.T(), "OAuth_Test_App_oauth-app-id.yaml", file.FileName)
+	assert.Equal(suite.T(), "applications", file.FolderPath)
+	assert.Contains(suite.T(), file.Content, "name: OAuth Test App")
+	assert.Contains(suite.T(), file.Content, "clientId: {{.O_AUTH_TEST_APP_CLIENT_ID}}")
+	assert.Contains(suite.T(), file.Content, "clientSecret: {{.O_AUTH_TEST_APP_CLIENT_SECRET}}")
+	assert.Contains(suite.T(), file.Content, "redirectUris:")
+	assert.Contains(suite.T(), file.Content, "{{- range .O_AUTH_TEST_APP_REDIRECT_URIS}}")
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), ".env", result.EnvFile.FileName)
+	assert.Contains(suite.T(), result.EnvFile.Content, "O_AUTH_TEST_APP_CLIENT_ID=client123\n")
+	assert.Contains(suite.T(), result.EnvFile.Content, "O_AUTH_TEST_APP_CLIENT_SECRET=\n")
+	expectedRedirectURIs := "O_AUTH_TEST_APP_REDIRECT_URIS=[\"http://localhost:3000/callback\"]\n"
+	assert.Contains(suite.T(), result.EnvFile.Content, expectedRedirectURIs)
+
+	assert.Equal(suite.T(), 1, result.Summary.ResourceTypes["application"])
+	assert.Equal(suite.T(), int64(len(file.Content)), file.Size)
+}
+
+// TestExportResources_HyphenatedApplicationName tests that a resource name containing a hyphen
+// produces template variables that Go's text/template can parse and that are present in the
+// generated .env file.
+func (suite *ExportServiceTestSuite) TestExportResources_HyphenatedApplicationName() {
+	appID := "hyphen-app-id"
+	request := &ExportRequest{
+		Applications: []string{appID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp := &providers.Application{
+		ID:   appID,
+		Name: "Wayfinder-Concierge",
+		InboundAuthConfig: []providers.InboundAuthConfigWithSecret{
+			{
+				Type: providers.OAuthInboundAuthType,
+				OAuthConfig: &providers.OAuthConfigWithSecret{
+					ClientID:     "client123",
+					RedirectURIs: []string{"http://localhost:3000/callback"},
+				},
+			},
+		},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+
+	file := result.Files[0]
+	assert.Contains(suite.T(), file.Content, "clientId: {{.WAYFINDER_CONCIERGE_CLIENT_ID}}")
+	assert.NotContains(suite.T(), file.Content, "WAYFINDER-CONCIERGE")
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Contains(suite.T(), result.EnvFile.Content, "WAYFINDER_CONCIERGE_CLIENT_ID=client123\n")
+
+	_, parseErr := template.New("export").Parse(file.Content)
+	assert.NoError(suite.T(), parseErr)
+}
+
+// TestExportResources_CollidingNormalizedNames tests that resource names normalizing to the same
+// variable prefix get distinct template variables and .env entries. The third name ends with a
+// separator, which normalizes to the same prefix as the first two.
+func (suite *ExportServiceTestSuite) TestExportResources_CollidingNormalizedNames() {
+	request := &ExportRequest{
+		Applications: []string{testApp1ID, testApp2ID, testApp3ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	newApp := func(id, name, clientID string) *providers.Application {
+		return &providers.Application{
+			ID:   id,
+			Name: name,
+			InboundAuthConfig: []providers.InboundAuthConfigWithSecret{
+				{
+					Type: providers.OAuthInboundAuthType,
+					OAuthConfig: &providers.OAuthConfigWithSecret{
+						ClientID: clientID,
+					},
+				},
+			},
+		}
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).
+		Return(newApp(testApp1ID, "Wayfinder-Concierge", "client-one"), nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).
+		Return(newApp(testApp2ID, "Wayfinder_Concierge", "client-two"), nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp3ID).
+		Return(newApp(testApp3ID, "Wayfinder Concierge-", "client-three"), nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	require.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 3)
+
+	assert.Contains(suite.T(), result.Files[0].Content, "clientId: {{.WAYFINDER_CONCIERGE_CLIENT_ID}}")
+	assert.Contains(suite.T(), result.Files[1].Content, "clientId: {{.WAYFINDER_CONCIERGE_2_CLIENT_ID}}")
+	assert.Contains(suite.T(), result.Files[2].Content, "clientId: {{.WAYFINDER_CONCIERGE_3_CLIENT_ID}}")
+	require.NotNil(suite.T(), result.EnvFile)
+	assert.Contains(suite.T(), result.EnvFile.Content, "WAYFINDER_CONCIERGE_CLIENT_ID=client-one\n")
+	assert.Contains(suite.T(), result.EnvFile.Content, "WAYFINDER_CONCIERGE_2_CLIENT_ID=client-two\n")
+	assert.Contains(suite.T(), result.EnvFile.Content, "WAYFINDER_CONCIERGE_3_CLIENT_ID=client-three\n")
+}
+
+// TestExportResources_MultipleApplications tests exporting multiple applications.
+func (suite *ExportServiceTestSuite) TestExportResources_MultipleApplications() {
+	request := &ExportRequest{
+		Applications: []string{testApp1ID, testApp2ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:          testApp1ID,
+		Name:        "App One",
+		Description: "First App",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:          testApp2ID,
+		Name:        "App Two",
+		Description: "Second App",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(mockApp2, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 2, result.Summary.ResourceTypes["application"])
+}
+
+// TestExportResources_PartialFailure tests exporting when some applications fail.
+func (suite *ExportServiceTestSuite) TestExportResources_PartialFailure() {
+	app1ID := "valid-app"
+	app2ID := "invalid-app"
+	request := &ExportRequest{
+		Applications: []string{app1ID, app2ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:   app1ID,
+		Name: "Valid App",
+	}
+
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app2ID).Return(nil, appError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1) // Only one successful export
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+	assert.Len(suite.T(), result.Summary.Errors, 1) // One error recorded
+	assert.Equal(suite.T(), "application", result.Summary.Errors[0].ResourceType)
+	assert.Equal(suite.T(), app2ID, result.Summary.Errors[0].ResourceID)
+}
+
+// TestExportResources_WildcardApplications tests exporting all applications using wildcard.
+func (suite *ExportServiceTestSuite) TestExportResources_WildcardApplications() {
+	request := &ExportRequest{
+		Applications: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	// Mock GetApplicationList to return 3 applications
+	mockAppList := &appmodel.ApplicationListResponse{
+		TotalResults: 3,
+		Count:        3,
+		Applications: []appmodel.BasicApplicationResponse{
+			{ID: testApp1ID, Name: "Application One"},
+			{ID: testApp2ID, Name: "Application Two"},
+			{ID: testApp3ID, Name: "Application Three"},
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:          testApp1ID,
+		Name:        "Application One",
+		Description: "First App",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:          testApp2ID,
+		Name:        "Application Two",
+		Description: "Second App",
+	}
+
+	mockApp3 := &providers.Application{
+		ID:          testApp3ID,
+		Name:        "Application Three",
+		Description: "Third App",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(mockAppList, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(mockApp2, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp3ID).Return(mockApp3, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 3) // All 3 applications exported
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 3, result.Summary.ResourceTypes["application"])
+	assert.Len(suite.T(), result.Summary.Errors, 0) // No errors
+}
+
+// TestExportResources_WildcardApplications_ListFailure tests wildcard export when GetApplicationList fails.
+func (suite *ExportServiceTestSuite) TestExportResources_WildcardApplications_ListFailure() {
+	request := &ExportRequest{
+		Applications: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	listError := &tidcommon.ServiceError{
+		Code:  "LIST_FAILED",
+		Error: tidcommon.I18nMessage{DefaultValue: "Failed to list applications"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(nil, listError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportResources_WildcardApplications_EmptyList tests wildcard export with empty application list.
+func (suite *ExportServiceTestSuite) TestExportResources_WildcardApplications_EmptyList() {
+	request := &ExportRequest{
+		Applications: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	// Mock GetApplicationList to return empty list
+	mockAppList := &appmodel.ApplicationListResponse{
+		TotalResults: 0,
+		Count:        0,
+		Applications: []appmodel.BasicApplicationResponse{},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(mockAppList, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportResources_WildcardApplications_PartialFailure tests wildcard export with partial failures.
+func (suite *ExportServiceTestSuite) TestExportResources_WildcardApplications_PartialFailure() {
+	request := &ExportRequest{
+		Applications: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	// Mock GetApplicationList to return 3 applications
+	mockAppList := &appmodel.ApplicationListResponse{
+		TotalResults: 3,
+		Count:        3,
+		Applications: []appmodel.BasicApplicationResponse{
+			{ID: testApp1ID, Name: "Application One"},
+			{ID: testApp2ID, Name: "Application Two"},
+			{ID: testApp3ID, Name: "Application Three"},
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:          testApp1ID,
+		Name:        "Application One",
+		Description: "First App",
+	}
+
+	mockApp3 := &providers.Application{
+		ID:          testApp3ID,
+		Name:        "Application Three",
+		Description: "Third App",
+	}
+
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(mockAppList, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(nil, appError)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp3ID).Return(mockApp3, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2) // 2 successful exports
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 2, result.Summary.ResourceTypes["application"])
+	assert.Len(suite.T(), result.Summary.Errors, 1) // One error recorded
+	assert.Equal(suite.T(), "application", result.Summary.Errors[0].ResourceType)
+	assert.Equal(suite.T(), testApp2ID, result.Summary.Errors[0].ResourceID)
+}
+
+// TestExportResources_IdentityProvider_Success tests exporting a single IDP successfully.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_Success() {
+	idpID := testIDPID
+	request := &ExportRequest{
+		Connections: []string{idpID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty, _ := cmodels.NewProperty("client_id", "test-client-id", false)
+	mockSecret, _ := cmodels.NewProperty(idp.PropClientSecret, "test-client-secret", true)
+	mockIDP := &providers.IDPDTO{
+		ID:          idpID,
+		Name:        "Test IDP",
+		Description: "Test Identity Provider",
+		Type:        providers.IDPTypeGoogle,
+		Properties:  []cmodels.Property{*mockProperty, *mockSecret},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, idpID).Return(mockIDP, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Summary.ResourceTypes, "connection")
+	assert.Equal(suite.T(), "Test_IDP.yaml", result.Files[0].FileName)
+	assert.Equal(suite.T(), "connection", result.Files[0].ResourceType)
+	assert.Contains(suite.T(), result.Files[0].Content, "name: Test IDP")
+}
+
+// TestExportResources_IdentityProvider_Multiple tests exporting multiple IDPs.
+// nolint:dupl // Similar test pattern for different resource types
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_Multiple() {
+	mockProperty1, _ := cmodels.NewProperty("client_id", "client1", false)
+	mockIDP1 := &providers.IDPDTO{
+		ID:         "idp1",
+		Name:       "Google IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty1},
+	}
+
+	mockProperty2, _ := cmodels.NewProperty("client_id", "client2", false)
+	mockIDP2 := &providers.IDPDTO{
+		ID:         "idp2",
+		Name:       "GitHub IDP",
+		Type:       providers.IDPTypeGitHub,
+		Properties: []cmodels.Property{*mockProperty2},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp1").Return(mockIDP1, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp2").Return(mockIDP2, nil)
+
+	request := &ExportRequest{
+		Connections: []string{"idp1", "idp2"},
+		Options:     &ExportOptions{Format: "yaml"},
+	}
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	suite.assertMultipleResourcesExport(result, err, 2, "connection")
+}
+
+// TestExportResources_IdentityProvider_Wildcard tests exporting all IDPs using wildcard.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_Wildcard() {
+	request := &ExportRequest{
+		Connections: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockIDPList := []idp.BasicIDPDTO{
+		{ID: "idp1", Name: "Google IDP", Type: providers.IDPTypeGoogle},
+		{ID: "idp2", Name: "GitHub IDP", Type: providers.IDPTypeGitHub},
+	}
+
+	mockProperty1, _ := cmodels.NewProperty("client_id", "client1", false)
+	mockSecret1, _ := cmodels.NewProperty(idp.PropClientSecret, "secret1", true)
+	mockIDP1 := &providers.IDPDTO{
+		ID:         "idp1",
+		Name:       "Google IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty1, *mockSecret1},
+	}
+
+	mockProperty2, _ := cmodels.NewProperty("client_id", "client2", false)
+	mockSecret2, _ := cmodels.NewProperty(idp.PropClientSecret, "secret2", true)
+	mockIDP2 := &providers.IDPDTO{
+		ID:         "idp2",
+		Name:       "GitHub IDP",
+		Type:       providers.IDPTypeGitHub,
+		Properties: []cmodels.Property{*mockProperty2, *mockSecret2},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProviderList(mock.Anything).Return(mockIDPList, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp1").Return(mockIDP1, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp2").Return(mockIDP2, nil)
+	suite.mockNotificationService.EXPECT().ListSenders(mock.Anything).Return(nil, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+}
+
+// TestExportResources_Mixed_ApplicationsAndIDPs tests exporting both applications and IDPs.
+func (suite *ExportServiceTestSuite) TestExportResources_Mixed_ApplicationsAndIDPs() {
+	request := &ExportRequest{
+		Applications: []string{testAppID},
+		Connections:  []string{testIDPID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp := &providers.Application{
+		ID:          testAppID,
+		Name:        "Test App",
+		Description: "Test Description",
+	}
+
+	mockProperty, _ := cmodels.NewProperty("client_id", "test-client-id", false)
+	mockSecret, _ := cmodels.NewProperty(idp.PropClientSecret, "test-client-secret", true)
+	mockIDP := &providers.IDPDTO{
+		ID:         testIDPID,
+		Name:       "Test IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty, *mockSecret},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testAppID).Return(mockApp, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, testIDPID).Return(mockIDP, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2) // 1 app + 1 IDP
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Summary.ResourceTypes, "application")
+	assert.Contains(suite.T(), result.Summary.ResourceTypes, "connection")
+	assert.Equal(suite.T(), 1, result.Summary.ResourceTypes["application"])
+	assert.Equal(suite.T(), 1, result.Summary.ResourceTypes["connection"])
+}
+
+// TestExportResources_IdentityProvider_NotFound tests error handling when IDP not found.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_NotFound() {
+	request := &ExportRequest{
+		Connections: []string{"non-existent-idp"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	idpError := &tidcommon.ServiceError{
+		Code:  "IDP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Identity provider not found"},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "non-existent-idp").Return(nil, idpError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Should return error since no valid resources found
+	assert.NotNil(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportResources_IdentityProvider_WildcardPartialFailure tests wildcard IDP export with partial failures.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_WildcardPartialFailure() {
+	request := &ExportRequest{
+		Connections: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockIDPList := []idp.BasicIDPDTO{
+		{ID: "idp1", Name: "Google IDP", Type: providers.IDPTypeGoogle},
+		{ID: "idp2", Name: "GitHub IDP", Type: providers.IDPTypeGitHub},
+		{ID: "idp3", Name: "OIDC IDP", Type: providers.IDPTypeOIDC},
+	}
+
+	mockProperty1, _ := cmodels.NewProperty("client_id", "client1", false)
+	mockSecret1, _ := cmodels.NewProperty(idp.PropClientSecret, "secret1", true)
+	mockIDP1 := &providers.IDPDTO{
+		ID:         "idp1",
+		Name:       "Google IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty1, *mockSecret1},
+	}
+
+	mockProperty3, _ := cmodels.NewProperty("client_id", "client3", false)
+	mockSecret3, _ := cmodels.NewProperty(idp.PropClientSecret, "secret3", true)
+	mockIDP3 := &providers.IDPDTO{
+		ID:         "idp3",
+		Name:       "OIDC IDP",
+		Type:       providers.IDPTypeOIDC,
+		Properties: []cmodels.Property{*mockProperty3, *mockSecret3},
+	}
+
+	idpError := &tidcommon.ServiceError{
+		Code:  "IDP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Identity provider not found"},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProviderList(mock.Anything).Return(mockIDPList, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp1").Return(mockIDP1, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp2").Return(nil, idpError)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp3").Return(mockIDP3, nil)
+	suite.mockNotificationService.EXPECT().ListSenders(mock.Anything).Return(nil, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2) // 2 successful exports
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 2, result.Summary.ResourceTypes["connection"])
+	assert.Len(suite.T(), result.Summary.Errors, 1) // One error recorded
+	assert.Equal(suite.T(), "connection", result.Summary.Errors[0].ResourceType)
+	assert.Equal(suite.T(), "idp2", result.Summary.Errors[0].ResourceID)
+}
+
+func (suite *ExportServiceTestSuite) assertExportNoProperties(request *ExportRequest, expectedContent string) {
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Should succeed even with no properties
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Files[0].Content, expectedContent)
+}
+
+// TestExportResources_IdentityProvider_NoProperties tests exporting IDP with no properties.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_NoProperties() {
+	request := &ExportRequest{
+		Connections: []string{"idp-no-props"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	// IDP with no properties
+	mockIDP := &providers.IDPDTO{
+		ID:         "idp-no-props",
+		Name:       "Empty IDP",
+		Type:       providers.IDPTypeOIDC,
+		Properties: []cmodels.Property{}, // Empty properties
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp-no-props").Return(mockIDP, nil)
+
+	suite.assertExportNoProperties(request, "name: Empty IDP")
+}
+
+// TestExportResources_IdentityProvider_EmptyName tests validation for IDP with empty name.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_EmptyName() {
+	request := &ExportRequest{
+		Connections: []string{"idp-no-name"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty, _ := cmodels.NewProperty("key", "value", false)
+	mockIDP := &providers.IDPDTO{
+		ID:         "idp-no-name",
+		Name:       "", // Empty name
+		Type:       providers.IDPTypeOIDC,
+		Properties: []cmodels.Property{*mockProperty},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp-no-name").Return(mockIDP, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Should return error since name is required
+	assert.NotNil(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportResources_IdentityProvider_PropertyParameterization verifies that the IDP's
+// secret field (clientSecret) is parameterized with a context-aware variable name, while
+// non-secret typed fields are exported as plain values.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_PropertyParameterization() {
+	idpID := "test-parameterization-idp"
+	request := &ExportRequest{
+		Connections: []string{idpID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	clientIDProp, _ := cmodels.NewProperty(idp.PropClientID, "test-client-123", false)
+	clientSecretProp, _ := cmodels.NewProperty(idp.PropClientSecret, "super-secret", true)
+	redirectURIProp, _ := cmodels.NewProperty(idp.PropRedirectURI, "http://localhost:3000", false)
+
+	mockIDP := &providers.IDPDTO{
+		ID:          idpID,
+		Name:        "Export Test IDP",
+		Description: "Test IDP for parameterization",
+		Type:        providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{
+			*clientIDProp,
+			*clientSecretProp,
+			*redirectURIProp,
+		},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, idpID).Return(mockIDP, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+
+	yamlContent := result.Files[0].Content
+
+	// Only the secret field is parameterized, with a context-aware variable name:
+	// IDP_NAME + FIELD_NAME in UPPER_SNAKE_CASE.
+	assert.Contains(suite.T(), yamlContent, "clientSecret: {{.EXPORT_TEST_IDP_CLIENT_SECRET}}")
+
+	// Non-secret typed fields are exported as plain values under their camelCase keys.
+	assert.Contains(suite.T(), yamlContent, "clientId: test-client-123")
+	assert.Contains(suite.T(), yamlContent, "redirectUri: http://localhost:3000")
+
+	// Verify basic connection fields.
+	assert.Contains(suite.T(), yamlContent, "name: Export Test IDP")
+	assert.Contains(suite.T(), yamlContent, "type: google")
+
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Contains(suite.T(), result.EnvFile.Content, "EXPORT_TEST_IDP_CLIENT_SECRET=super-secret")
+}
+
+// TestExportResources_IdentityProvider_PropertyStructure verifies that a connection with
+// only non-secret typed fields is exported without any parameterized variables.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_PropertyStructure() {
+	idpID := "test-property-structure"
+	request := &ExportRequest{
+		Connections: []string{idpID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	clientIDProp, _ := cmodels.NewProperty(idp.PropClientID, "test-client-123", false)
+	redirectURIProp, _ := cmodels.NewProperty(idp.PropRedirectURI, "https://example.com/callback", false)
+
+	mockIDP := &providers.IDPDTO{
+		ID:          idpID,
+		Name:        "Property Structure Test",
+		Description: "Test IDP for property YAML structure validation",
+		Type:        providers.IDPTypeOIDC,
+		Properties: []cmodels.Property{
+			*clientIDProp,
+			*redirectURIProp,
+		},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, idpID).Return(mockIDP, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+
+	yamlContent := result.Files[0].Content
+
+	// Verify basic connection fields and the typed (non-secret) field values.
+	assert.Contains(suite.T(), yamlContent, "name: Property Structure Test")
+	assert.Contains(suite.T(), yamlContent, "description: Test IDP for property YAML structure validation")
+	assert.Contains(suite.T(), yamlContent, "type: oidc")
+	assert.Contains(suite.T(), yamlContent, "clientId: test-client-123")
+	assert.Contains(suite.T(), yamlContent, "redirectUri: https://example.com/callback")
+
+	// No secret field is set, so no variable is parameterized and no env file is produced.
+	assert.Nil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+}
+
+// TestExportResources_PartialFailure_DetailedErrorValidation enhances the existing partial failure test
+// with detailed error field validation.
+func (suite *ExportServiceTestSuite) TestExportResources_PartialFailure_DetailedErrorValidation() {
+	app1ID := "app1"
+	app2ID := "app2-not-found"
+
+	request := &ExportRequest{
+		Applications: []string{app1ID, app2ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:   app1ID,
+		Name: "Valid App",
+	}
+
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app2ID).Return(nil, appError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Verify successful export
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+
+	// Verify error details
+	assert.Len(suite.T(), result.Summary.Errors, 1)
+	exportError := result.Summary.Errors[0]
+	assert.Equal(suite.T(), "application", exportError.ResourceType)
+	assert.Equal(suite.T(), app2ID, exportError.ResourceID)
+	assert.Equal(suite.T(), "APP_NOT_FOUND", exportError.Code)
+	assert.Equal(suite.T(), "Application not found", exportError.Error)
+
+	// Verify file size calculation
+	assert.Equal(suite.T(), int64(len(result.Files[0].Content)), result.Files[0].Size)
+	assert.Greater(suite.T(), result.Summary.TotalSize, int64(0))
+}
+
+// TestExportResources_IdentityProvider_PartialFailure_DetailedErrorValidation tests IDP partial failure.
+func (suite *ExportServiceTestSuite) TestExportResources_IdentityProvider_PartialFailure_DetailedErrorValidation() {
+	request := &ExportRequest{
+		Connections: []string{"idp1", "idp2-not-found", "idp3"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty1, _ := cmodels.NewProperty("client_id", "client1", false)
+	mockSecret1, _ := cmodels.NewProperty(idp.PropClientSecret, "secret1", true)
+	mockIDP1 := &providers.IDPDTO{
+		ID:         "idp1",
+		Name:       "Google IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty1, *mockSecret1},
+	}
+
+	mockProperty3, _ := cmodels.NewProperty("client_id", "client3", false)
+	mockSecret3, _ := cmodels.NewProperty(idp.PropClientSecret, "secret3", true)
+	mockIDP3 := &providers.IDPDTO{
+		ID:         "idp3",
+		Name:       "GitHub IDP",
+		Type:       providers.IDPTypeGitHub,
+		Properties: []cmodels.Property{*mockProperty3, *mockSecret3},
+	}
+
+	idpError := &tidcommon.ServiceError{
+		Code:  "IDP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Identity provider not found"},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp1").Return(mockIDP1, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp2-not-found").Return(nil, idpError)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp3").Return(mockIDP3, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Verify partial success
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2) // Two successful exports
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+
+	// Verify error details
+	assert.Len(suite.T(), result.Summary.Errors, 1)
+	exportError := result.Summary.Errors[0]
+	assert.Equal(suite.T(), "connection", exportError.ResourceType)
+	assert.Equal(suite.T(), "idp2-not-found", exportError.ResourceID)
+	assert.Equal(suite.T(), "IDP_NOT_FOUND", exportError.Code)
+	assert.Equal(suite.T(), "Identity provider not found", exportError.Error)
+
+	// Verify file sizes
+	for _, file := range result.Files {
+		assert.Equal(suite.T(), int64(len(file.Content)), file.Size)
+	}
+	assert.Greater(suite.T(), result.Summary.TotalSize, int64(0))
+}
+
+// TestExportResources_MixedResources_WithErrors tests exporting both apps and IDPs with some failures.
+func (suite *ExportServiceTestSuite) TestExportResources_MixedResources_WithErrors() {
+	request := &ExportRequest{
+		Applications: []string{"app1", "app2-not-found"},
+		Connections:  []string{"idp1", "idp2-not-found"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	// Setup successful app
+	mockApp1 := &providers.Application{
+		ID:   "app1",
+		Name: "Valid App",
+	}
+
+	// Setup app error
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	// Setup successful IDP
+	mockProperty1, _ := cmodels.NewProperty("client_id", "client1", false)
+	mockSecret1, _ := cmodels.NewProperty(idp.PropClientSecret, "secret1", true)
+	mockIDP1 := &providers.IDPDTO{
+		ID:         "idp1",
+		Name:       "Google IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty1, *mockSecret1},
+	}
+
+	// Setup IDP error
+	idpError := &tidcommon.ServiceError{
+		Code:  "IDP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Identity provider not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, "app1").Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, "app2-not-found").Return(nil, appError)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp1").Return(mockIDP1, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp2-not-found").Return(nil, idpError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Verify partial success
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2) // One app + one IDP
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+
+	// Verify resource type counts
+	assert.Equal(suite.T(), 1, result.Summary.ResourceTypes["application"])
+	assert.Equal(suite.T(), 1, result.Summary.ResourceTypes["connection"])
+
+	// Verify errors - should have 2 errors (1 app, 1 IDP)
+	assert.Len(suite.T(), result.Summary.Errors, 2)
+
+	// Verify app error
+	var appErrorFound bool
+	var idpErrorFound bool
+	for _, e := range result.Summary.Errors {
+		if e.ResourceType == resourceTypeApplication {
+			appErrorFound = true
+			assert.Equal(suite.T(), "app2-not-found", e.ResourceID)
+			assert.Equal(suite.T(), "APP_NOT_FOUND", e.Code)
+		}
+		if e.ResourceType == resourceTypeConnection {
+			idpErrorFound = true
+			assert.Equal(suite.T(), "idp2-not-found", e.ResourceID)
+			assert.Equal(suite.T(), "IDP_NOT_FOUND", e.Code)
+		}
+	}
+	assert.True(suite.T(), appErrorFound, "Application error not found in Summary.Errors")
+	assert.True(suite.T(), idpErrorFound, "IDP error not found in Summary.Errors")
+}
+
+// TestExportResources_FileSizeCalculation tests that file sizes are calculated correctly.
+func (suite *ExportServiceTestSuite) TestExportResources_FileSizeCalculation() {
+	request := &ExportRequest{
+		Applications: []string{testApp1ID, testApp2ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:          testApp1ID,
+		Name:        "Application One",
+		Description: "First application",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:          testApp2ID,
+		Name:        "Application Two",
+		Description: "Second application with longer description",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(mockApp2, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+
+	// Verify each file's size matches its content length
+	var totalCalculatedSize int64
+	for _, file := range result.Files {
+		expectedSize := int64(len(file.Content))
+		assert.Equal(suite.T(), expectedSize, file.Size, "File size mismatch for %s", file.FileName)
+		assert.Greater(suite.T(), file.Size, int64(0), "File size should be greater than 0")
+		totalCalculatedSize += file.Size
+	}
+
+	// Verify total size matches sum of individual file sizes
+	assert.Equal(suite.T(), totalCalculatedSize, result.Summary.TotalSize)
+	assert.Greater(suite.T(), result.Summary.TotalSize, int64(0))
+}
+
+// MockParameterizer is a mock implementation of ParameterizerInterface for testing.
+type MockParameterizer struct {
+	shouldFail bool
+	errorMsg   string
+}
+
+func (m *MockParameterizer) ToParameterizedYAML(_ context.Context, obj interface{},
+	resourceType string, resourceName string,
+	rules *declarativeresource.ResourceRules) (string, map[string]string, error) {
+	if m.shouldFail {
+		return "", nil, fmt.Errorf("%s", m.errorMsg)
+	}
+	// Return minimal valid YAML
+	return "id: test\nname: test\n", nil, nil
+}
+
+func (m *MockParameterizer) VarPrefix(resourceName string) string {
+	return newParameterizer(templatingRules{}).VarPrefix(resourceName)
+}
+
+// TestExportResources_TemplateGenerationError tests the error path in generateTemplateFromStruct.
+func (suite *ExportServiceTestSuite) TestExportResources_TemplateGenerationError() {
+	request := &ExportRequest{
+		Applications: []string{testApp1ID, testApp2ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:   testApp1ID,
+		Name: "Valid App",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:   testApp2ID,
+		Name: "App That Fails Template Generation",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(mockApp2, nil)
+
+	// Create a mock parameterizer that returns errors
+	mockParameterizer := &MockParameterizer{
+		shouldFail: true,
+		errorMsg:   "template generation failed: unknown resource type",
+	}
+
+	// Create exporters with the test services
+	exporters := []declarativeresource.ResourceExporter{
+		application.NewApplicationExporterForTest(suite.appServiceMock),
+		connection.NewConnectionExporterForTest(suite.idpServiceMock, suite.mockNotificationService),
+		entitytype.NewEntityTypeExporterForTest(suite.mockEntityTypeService, entitytype.TypeCategoryUser),
+	}
+
+	// Create a new export service with the mock parameterizer
+	exportServiceWithMock := newExportService(exporters, mockParameterizer)
+
+	result, err := exportServiceWithMock.ExportResources(context.Background(), request)
+
+	// When all resources fail template generation, service returns error
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+
+	// Result should be nil when error is returned
+	assert.Nil(suite.T(), result)
+}
+
+// TestExportResources_WithCustomFolderStructure tests the CustomStructure path in generateFolderPath.
+func (suite *ExportServiceTestSuite) TestExportResources_WithCustomFolderStructure() {
+	request := &ExportRequest{
+		Applications: []string{testApp1ID},
+		Options: &ExportOptions{
+			Format: "yaml",
+			FolderStructure: &FolderStructureOptions{
+				CustomStructure: map[string]string{
+					"application": "custom/apps/folder",
+				},
+			},
+		},
+	}
+
+	mockApp := &providers.Application{
+		ID:   testApp1ID,
+		Name: "Test Application",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+
+	// Verify the file has custom folder path
+	assert.Equal(suite.T(), "custom/apps/folder", result.Files[0].FolderPath)
+}
+
+// TestExportResources_WithGroupByTypeStructure tests the GroupByType path in generateFolderPath.
+func (suite *ExportServiceTestSuite) TestExportResources_WithGroupByTypeStructure() {
+	request := &ExportRequest{
+		Applications: []string{testApp1ID, testApp2ID},
+		Connections:  []string{"idp1"},
+		Options: &ExportOptions{
+			Format: "yaml",
+			FolderStructure: &FolderStructureOptions{
+				GroupByType: true,
+			},
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:   testApp1ID,
+		Name: "Application One",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:   testApp2ID,
+		Name: "Application Two",
+	}
+
+	mockProperty, _ := cmodels.NewProperty("client_id", "test-client", false)
+	mockIDP := &providers.IDPDTO{
+		ID:         "idp1",
+		Name:       "Test IDP",
+		Type:       providers.IDPTypeGoogle,
+		Properties: []cmodels.Property{*mockProperty},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(mockApp2, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "idp1").Return(mockIDP, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 3) // 2 apps + 1 IDP
+
+	// Verify applications are in "applications" folder
+	appFiles := 0
+	idpFiles := 0
+	for _, file := range result.Files {
+		if file.ResourceType == "application" {
+			assert.Equal(suite.T(), "applications", file.FolderPath)
+			appFiles++
+		} else if file.ResourceType == "connection" {
+			assert.Equal(suite.T(), "connections", file.FolderPath)
+			idpFiles++
+		}
+	}
+
+	assert.Equal(suite.T(), 2, appFiles, "Should have 2 application files")
+	assert.Equal(suite.T(), 1, idpFiles, "Should have 1 IDP file")
+}
+
+// TestExportNotificationSenders_Success tests successful export of notification senders.
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_Success() {
+	request := &ExportRequest{
+		Connections: []string{"sender1"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty, _ := cmodels.NewProperty("api_key", "test-api-key", true)
+	mockSender := &common.NotificationSenderDTO{
+		ID:          "sender1",
+		Name:        "Test Sender",
+		Description: "Test notification sender",
+		Provider:    common.MessageProviderTypeTwilio,
+		Properties:  []cmodels.Property{*mockProperty},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender1").Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender1").Return(mockSender, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Summary.ResourceTypes, "connection")
+	assert.Equal(suite.T(), "Test_Sender.yaml", result.Files[0].FileName)
+	assert.Equal(suite.T(), "connection", result.Files[0].ResourceType)
+	assert.Contains(suite.T(), result.Files[0].Content, "name: Test Sender")
+}
+
+// TestExportNotificationSenders_Multiple tests exporting multiple notification senders.
+// nolint:dupl // Similar test pattern for different resource types
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_Multiple() {
+	mockProperty1, _ := cmodels.NewProperty("api_key", "key1", true)
+	mockSender1 := &common.NotificationSenderDTO{
+		ID:         "sender1",
+		Name:       "Twilio Sender",
+		Provider:   common.MessageProviderTypeTwilio,
+		Properties: []cmodels.Property{*mockProperty1},
+	}
+
+	mockProperty2, _ := cmodels.NewProperty("api_key", "key2", true)
+	mockSender2 := &common.NotificationSenderDTO{
+		ID:         "sender2",
+		Name:       "Vonage Sender",
+		Provider:   common.MessageProviderTypeVonage,
+		Properties: []cmodels.Property{*mockProperty2},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender1").Return(nil, &idp.ErrorIDPNotFound)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender2").Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender1").Return(mockSender1, nil)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender2").Return(mockSender2, nil)
+
+	request := &ExportRequest{
+		Connections: []string{"sender1", "sender2"},
+		Options:     &ExportOptions{Format: "yaml"},
+	}
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	suite.assertMultipleResourcesExport(result, err, 2, "connection")
+}
+
+// TestExportNotificationSenders_Wildcard tests exporting all notification senders using wildcard.
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_Wildcard() {
+	request := &ExportRequest{
+		Connections: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty1, _ := cmodels.NewProperty("api_key", "key1", true)
+	mockSender1 := &common.NotificationSenderDTO{
+		ID:         "sender1",
+		Name:       "Twilio Sender",
+		Type:       common.NotificationSenderTypeMessage,
+		Provider:   common.MessageProviderTypeTwilio,
+		Properties: []cmodels.Property{*mockProperty1},
+	}
+
+	mockProperty2, _ := cmodels.NewProperty("api_key", "key2", true)
+	mockSender2 := &common.NotificationSenderDTO{
+		ID:         "sender2",
+		Name:       "Vonage Sender",
+		Type:       common.NotificationSenderTypeMessage,
+		Provider:   common.MessageProviderTypeVonage,
+		Properties: []cmodels.Property{*mockProperty2},
+	}
+
+	mockSenderList := []common.NotificationSenderDTO{*mockSender1, *mockSender2}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProviderList(mock.Anything).Return(nil, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender1").Return(nil, &idp.ErrorIDPNotFound)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender2").Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().ListSenders(mock.Anything).Return(mockSenderList, nil)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender1").Return(mockSender1, nil)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender2").Return(mockSender2, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+}
+
+// TestExportNotificationSenders_NotFound tests error handling when sender not found.
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_NotFound() {
+	request := &ExportRequest{
+		Connections: []string{"non-existent-sender"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	senderError := &tidcommon.ServiceError{
+		Code:  "SENDER_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Notification sender not found"},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "non-existent-sender").
+		Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "non-existent-sender").Return(nil, senderError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.NotNil(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportNotificationSenders_EmptyName tests validation for sender with empty name.
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_EmptyName() {
+	request := &ExportRequest{
+		Connections: []string{"sender-no-name"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty, _ := cmodels.NewProperty("api_key", "test-key", true)
+	mockSender := &common.NotificationSenderDTO{
+		ID:         "sender-no-name",
+		Name:       "", // Empty name
+		Provider:   common.MessageProviderTypeTwilio,
+		Properties: []cmodels.Property{*mockProperty},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender-no-name").
+		Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender-no-name").Return(mockSender, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.NotNil(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportNotificationSenders_NoProperties tests exporting sender with no properties.
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_NoProperties() {
+	request := &ExportRequest{
+		Connections: []string{"sender-no-props"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSender := &common.NotificationSenderDTO{
+		ID:         "sender-no-props",
+		Name:       "Empty Sender",
+		Provider:   common.MessageProviderTypeTwilio,
+		Properties: []cmodels.Property{}, // Empty properties
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender-no-props").
+		Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender-no-props").Return(mockSender, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Should succeed even with no properties. Unlike IdP-backed vendors, the Twilio secret
+	// rule always externalizes AuthToken, so an (empty-valued) env var is still generated.
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Files[0].Content, "name: Empty Sender")
+}
+
+// TestExportNotificationSenders_WildcardPartialFailure tests wildcard export with partial failures.
+func (suite *ExportServiceTestSuite) TestExportNotificationSenders_WildcardPartialFailure() {
+	request := &ExportRequest{
+		Connections: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockProperty1, _ := cmodels.NewProperty("api_key", "key1", true)
+	mockSender1 := &common.NotificationSenderDTO{
+		ID:         "sender1",
+		Name:       "Twilio Sender",
+		Type:       common.NotificationSenderTypeMessage,
+		Provider:   common.MessageProviderTypeTwilio,
+		Properties: []cmodels.Property{*mockProperty1},
+	}
+
+	mockSender2 := &common.NotificationSenderDTO{
+		ID:       "sender2",
+		Name:     "Failing Sender",
+		Type:     common.NotificationSenderTypeMessage,
+		Provider: common.MessageProviderTypeVonage,
+	}
+
+	mockProperty3, _ := cmodels.NewProperty("api_key", "key3", true)
+	mockSender3 := &common.NotificationSenderDTO{
+		ID:         "sender3",
+		Name:       "Vonage Sender",
+		Type:       common.NotificationSenderTypeMessage,
+		Provider:   common.MessageProviderTypeVonage,
+		Properties: []cmodels.Property{*mockProperty3},
+	}
+
+	// Create list with 3 senders but sender2 will fail to retrieve
+	mockSenderList := []common.NotificationSenderDTO{*mockSender1, *mockSender2, *mockSender3}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProviderList(mock.Anything).Return(nil, nil)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender1").Return(nil, &idp.ErrorIDPNotFound)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender2").Return(nil, &idp.ErrorIDPNotFound)
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, "sender3").Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().ListSenders(mock.Anything).Return(mockSenderList, nil)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender1").Return(mockSender1, nil)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender2").
+		Return(nil, &tidcommon.InternalServerError)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, "sender3").Return(mockSender3, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+	assert.NotNil(suite.T(), result.EnvFile)
+	assert.Equal(suite.T(), 3, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 2, result.Summary.ResourceTypes["connection"])
+	if assert.Len(suite.T(), result.Summary.Errors, 1) {
+		assert.Equal(suite.T(), "sender2", result.Summary.Errors[0].ResourceID)
+	}
+}
+
+// TestExportEntityTypes_Success tests successful export of entity types.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_Success() {
+	request := &ExportRequest{
+		UserTypes: []string{"schema1"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSchema := &entitytype.EntityType{
+		ID:                    "schema1",
+		Name:                  "Test Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte(`{"type":"object","properties":{"email":{"type":"string"}}}`),
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema1", mock.Anything).
+		Return(mockSchema, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Summary.ResourceTypes, "user_type")
+	assert.Equal(suite.T(), "Test_Schema.yaml", result.Files[0].FileName)
+	assert.Equal(suite.T(), "user_type", result.Files[0].ResourceType)
+	assert.Contains(suite.T(), result.Files[0].Content, "name: Test Schema")
+}
+
+// TestExportEntityTypes_Multiple tests exporting multiple entity types.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_Multiple() {
+	request := &ExportRequest{
+		UserTypes: []string{"schema1", "schema2"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSchema1 := &entitytype.EntityType{
+		ID:                    "schema1",
+		Name:                  "Customer Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte(`{"type":"object","properties":{"email":{"type":"string"}}}`),
+	}
+
+	mockSchema2 := &entitytype.EntityType{
+		ID:                    "schema2",
+		Name:                  "Employee Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: false,
+		Schema:                []byte(`{"type":"object","properties":{"empId":{"type":"string"}}}`),
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema1", mock.Anything).
+		Return(mockSchema1, nil)
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema2", mock.Anything).
+		Return(mockSchema2, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 2, result.Summary.ResourceTypes["user_type"])
+}
+
+// TestExportEntityTypes_Wildcard tests exporting all entity types using wildcard.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_Wildcard() {
+	request := &ExportRequest{
+		UserTypes: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSchema1 := &entitytype.EntityType{
+		ID:                    "schema1",
+		Name:                  "Customer Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte(`{"type":"object","properties":{"email":{"type":"string"}}}`),
+	}
+
+	mockSchema2 := &entitytype.EntityType{
+		ID:                    "schema2",
+		Name:                  "Employee Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: false,
+		Schema:                []byte(`{"type":"object","properties":{"empId":{"type":"string"}}}`),
+	}
+
+	mockSchemaList := &entitytype.EntityTypeListResponse{
+		TotalResults: 2,
+		Count:        2,
+		Types: []entitytype.EntityTypeListItem{
+			{ID: "schema1", Name: "Customer Schema", OUID: "ou1"},
+			{ID: "schema2", Name: "Employee Schema", OUID: "ou1"},
+		},
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityTypeList(mock.Anything, mock.Anything, 100, 0, mock.Anything).Return(mockSchemaList, nil).Once()
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityTypeList(mock.Anything, mock.Anything, 100, 2, mock.Anything).
+		Return(&entitytype.EntityTypeListResponse{Types: []entitytype.EntityTypeListItem{}}, nil).Once()
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema1", mock.Anything).
+		Return(mockSchema1, nil)
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema2", mock.Anything).
+		Return(mockSchema2, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2)
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+}
+
+// TestExportEntityTypes_NotFound tests error handling when schema not found.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_NotFound() {
+	request := &ExportRequest{
+		UserTypes: []string{"non-existent-schema"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	schemaError := &tidcommon.ServiceError{
+		Code:  "SCHEMA_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "User type not found"},
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(
+			mock.Anything, mock.Anything, "non-existent-schema", mock.Anything).
+		Return(nil, schemaError)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.NotNil(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportEntityTypes_EmptyName tests validation for schema with empty name.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_EmptyName() {
+	request := &ExportRequest{
+		UserTypes: []string{"schema-no-name"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSchema := &entitytype.EntityType{
+		ID:                    "schema-no-name",
+		Name:                  "", // Empty name
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte(`{"type":"object"}`),
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(
+			mock.Anything, mock.Anything, "schema-no-name", mock.Anything).
+		Return(mockSchema, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.NotNil(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), ErrorNoResourcesFound.Code, err.Code)
+}
+
+// TestExportEntityTypes_NoSchema tests exporting schema with no schema definition.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_NoSchema() {
+	request := &ExportRequest{
+		UserTypes: []string{"schema-no-def"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSchema := &entitytype.EntityType{
+		ID:                    "schema-no-def",
+		Name:                  "Empty Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte{}, // Empty schema
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(
+			mock.Anything, mock.Anything, "schema-no-def", mock.Anything).
+		Return(mockSchema, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	// Should succeed even with no schema definition
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 1)
+	assert.Equal(suite.T(), 1, result.Summary.TotalFiles)
+	assert.Contains(suite.T(), result.Files[0].Content, "name: Empty Schema")
+}
+
+// TestExportEntityTypes_WildcardPartialFailure tests wildcard export with partial failures.
+func (suite *ExportServiceTestSuite) TestExportEntityTypes_WildcardPartialFailure() {
+	request := &ExportRequest{
+		UserTypes: []string{"*"},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	mockSchema1 := &entitytype.EntityType{
+		ID:                    "schema1",
+		Name:                  "Customer Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte(`{"type":"object"}`),
+	}
+
+	mockSchema3 := &entitytype.EntityType{
+		ID:                    "schema3",
+		Name:                  "Partner Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: false,
+		Schema:                []byte(`{"type":"object"}`),
+	}
+
+	mockSchemaList := &entitytype.EntityTypeListResponse{
+		TotalResults: 3,
+		Count:        3,
+		Types: []entitytype.EntityTypeListItem{
+			{ID: "schema1", Name: "Customer Schema"},
+			{ID: "schema2", Name: "Employee Schema"},
+			{ID: "schema3", Name: "Partner Schema"},
+		},
+	}
+
+	schemaError := &tidcommon.ServiceError{
+		Code:  "SCHEMA_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "User type not found"},
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityTypeList(mock.Anything, mock.Anything, 100, 0, mock.Anything).Return(mockSchemaList, nil).Once()
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityTypeList(mock.Anything, mock.Anything, 100, 3, mock.Anything).
+		Return(&entitytype.EntityTypeListResponse{Types: []entitytype.EntityTypeListItem{}}, nil).Once()
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema1", mock.Anything).
+		Return(mockSchema1, nil)
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema2", mock.Anything).
+		Return(nil, schemaError)
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, "schema3", mock.Anything).
+		Return(mockSchema3, nil)
+
+	result, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, 2) // 2 successful exports
+	assert.Equal(suite.T(), 2, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), 2, result.Summary.ResourceTypes["user_type"])
+	assert.Len(suite.T(), result.Summary.Errors, 1) // One error recorded
+	assert.Equal(suite.T(), "user_type", result.Summary.Errors[0].ResourceType)
+	assert.Equal(suite.T(), "schema2", result.Summary.Errors[0].ResourceID)
+}
+
+// Helper functions for test assertions
+
+// assertMultipleResourcesExport is a helper function to assert multiple resource export results.
+func (suite *ExportServiceTestSuite) assertMultipleResourcesExport(
+	result *ExportResponse, err *tidcommon.ServiceError, expectedCount int, resourceTypeKey string) {
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Len(suite.T(), result.Files, expectedCount)
+	expectedTotalFiles := expectedCount
+	if result.EnvFile != nil {
+		expectedTotalFiles++
+	}
+	assert.Equal(suite.T(), expectedTotalFiles, result.Summary.TotalFiles)
+	assert.Equal(suite.T(), expectedCount, result.Summary.ResourceTypes[resourceTypeKey])
+}
+
+// Tests for exportResourcesWithExporter
+
+// TestExportResourcesWithExporter_Success tests successful export with a valid exporter.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_Success() {
+	appID := testAppTestID
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "Test Application",
+		Description: "Test Description",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	// Get the exporter from the service's registry
+	exporter, exists := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	assert.True(suite.T(), exists, "Application exporter should be registered")
+
+	options := &ExportOptions{
+		Format: formatYAML,
+	}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{appID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Test_Application.yaml", files[0].FileName)
+	assert.Equal(suite.T(), resourceTypeApplication, files[0].ResourceType)
+	assert.Equal(suite.T(), appID, files[0].ResourceID)
+	assert.Contains(suite.T(), files[0].Content, "name: Test Application")
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_MultipleResources tests exporting multiple resources.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_MultipleResources() {
+	app1ID := "app-1"
+	app2ID := "app-2"
+	app3ID := "app-3"
+
+	mockApp1 := &providers.Application{
+		ID:          app1ID,
+		Name:        "Application One",
+		Description: "First App",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:          app2ID,
+		Name:        "Application Two",
+		Description: "Second App",
+	}
+
+	mockApp3 := &providers.Application{
+		ID:          app3ID,
+		Name:        "Application Three",
+		Description: "Third App",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app2ID).Return(mockApp2, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, app3ID).Return(mockApp3, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{app1ID, app2ID, app3ID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 3)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Application_One.yaml", files[0].FileName)
+	assert.Equal(suite.T(), "Application_Two.yaml", files[1].FileName)
+	assert.Equal(suite.T(), "Application_Three.yaml", files[2].FileName)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_ResourceNotFound tests when a resource is not found.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_ResourceNotFound() {
+	appID := "non-existent-app"
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(nil, appError)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{appID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 0)
+	assert.Len(suite.T(), errors, 1)
+	assert.Equal(suite.T(), resourceTypeApplication, errors[0].ResourceType)
+	assert.Equal(suite.T(), appID, errors[0].ResourceID)
+	assert.Equal(suite.T(), "APP_NOT_FOUND", errors[0].Code)
+	assert.Equal(suite.T(), "Application not found", errors[0].Error)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_PartialSuccess tests when some resources succeed and some fail.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_PartialSuccess() {
+	validAppID := "valid-app"
+	invalidAppID := "invalid-app"
+
+	mockApp := &providers.Application{
+		ID:          validAppID,
+		Name:        "Valid Application",
+		Description: "Valid Description",
+	}
+
+	appError := &tidcommon.ServiceError{
+		Code:  "APP_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Application not found"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, validAppID).Return(mockApp, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, invalidAppID).Return(nil, appError)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{validAppID, invalidAppID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 1)
+	assert.Equal(suite.T(), "Valid_Application.yaml", files[0].FileName)
+	assert.Equal(suite.T(), resourceTypeApplication, errors[0].ResourceType)
+	assert.Equal(suite.T(), invalidAppID, errors[0].ResourceID)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WildcardSuccess tests wildcard export.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WildcardSuccess() {
+	mockAppList := &appmodel.ApplicationListResponse{
+		TotalResults: 2,
+		Count:        2,
+		Applications: []appmodel.BasicApplicationResponse{
+			{ID: testApp1ID, Name: "App One"},
+			{ID: testApp2ID, Name: "App Two"},
+		},
+	}
+
+	mockApp1 := &providers.Application{
+		ID:          testApp1ID,
+		Name:        "App One",
+		Description: "First App",
+	}
+
+	mockApp2 := &providers.Application{
+		ID:          testApp2ID,
+		Name:        "App Two",
+		Description: "Second App",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(mockAppList, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp1ID).Return(mockApp1, nil)
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, testApp2ID).Return(mockApp2, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{"*"}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 2)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "App_One.yaml", files[0].FileName)
+	assert.Equal(suite.T(), "App_Two.yaml", files[1].FileName)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WildcardFailure tests wildcard when GetAllResourceIDs fails.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WildcardFailure() {
+	listError := &tidcommon.ServiceError{
+		Code:  "LIST_FAILED",
+		Error: tidcommon.I18nMessage{DefaultValue: "Failed to list applications"},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(nil, listError)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{"*"}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 0)
+	assert.Len(suite.T(), errors, 0) // Returns empty slices on wildcard failure
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WildcardEmptyList tests wildcard with no resources.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WildcardEmptyList() {
+	mockAppList := &appmodel.ApplicationListResponse{
+		TotalResults: 0,
+		Count:        0,
+		Applications: []appmodel.BasicApplicationResponse{},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplicationList(mock.Anything).Return(mockAppList, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{"*"}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 0)
+	assert.Len(suite.T(), errors, 0)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WithGroupByType tests export with GroupByType option.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WithGroupByType() {
+	appID := testAppTestID
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "Test App",
+		Description: "Test Description",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{
+		Format: formatYAML,
+		FolderStructure: &FolderStructureOptions{
+			GroupByType: true,
+		},
+	}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{appID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "applications", files[0].FolderPath)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WithCustomFileNaming tests export with custom file naming pattern.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WithCustomFileNaming() {
+	appID := "app-123"
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "My Application",
+		Description: "Test Description",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{
+		Format: formatYAML,
+		FolderStructure: &FolderStructureOptions{
+			FileNamingPattern: "${name}_${id}",
+		},
+	}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{appID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "My_Application_app-123.yaml", files[0].FileName)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_IdentityProvider tests export with IDP exporter.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_IdentityProvider() {
+	idpID := "idp-test-id"
+	mockIDP := &providers.IDPDTO{
+		ID:          idpID,
+		Name:        "Test IDP",
+		Description: "Test IDP Description",
+		Type:        providers.IDPTypeGoogle,
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, idpID).Return(mockIDP, nil)
+
+	exporter, exists := suite.exportService.(*exportService).registry.Get(resourceTypeConnection)
+	assert.True(suite.T(), exists, "connection exporter should be registered")
+
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{idpID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Test_IDP.yaml", files[0].FileName)
+	assert.Equal(suite.T(), resourceTypeConnection, files[0].ResourceType)
+	assert.Equal(suite.T(), idpID, files[0].ResourceID)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_NotificationSender tests export with notification sender exporter.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_NotificationSender() {
+	senderID := "sender-test-id"
+	mockProperty, _ := cmodels.NewProperty(common.TwilioPropKeyAuthToken, "key1", true)
+	mockSender := &common.NotificationSenderDTO{
+		ID:         senderID,
+		Name:       "Test Sender",
+		Provider:   common.MessageProviderTypeTwilio,
+		Properties: []cmodels.Property{*mockProperty},
+	}
+
+	suite.idpServiceMock.EXPECT().GetIdentityProvider(mock.Anything, senderID).Return(nil, &idp.ErrorIDPNotFound)
+	suite.mockNotificationService.EXPECT().GetSender(mock.Anything, senderID).Return(mockSender, nil)
+
+	exporter, exists := suite.exportService.(*exportService).registry.Get(resourceTypeConnection)
+	assert.True(suite.T(), exists, "connection exporter should be registered")
+
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{senderID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Test_Sender.yaml", files[0].FileName)
+	assert.Equal(suite.T(), resourceTypeConnection, files[0].ResourceType)
+	assert.Equal(suite.T(), senderID, files[0].ResourceID)
+	assert.NotEmpty(suite.T(), variables)
+	assert.Equal(suite.T(), "key1", variables["TEST_SENDER_AUTH_TOKEN"])
+}
+
+// TestExportResourcesWithExporter_EntityType tests export with entity type exporter.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_EntityType() {
+	schemaID := "schema-test-id"
+	mockSchema := &entitytype.EntityType{
+		ID:                    schemaID,
+		Name:                  "Test Schema",
+		OUID:                  "ou1",
+		AllowSelfRegistration: true,
+		Schema:                []byte(`{"type":"object","properties":{"email":{"type":"string"}}}`),
+	}
+
+	suite.mockEntityTypeService.EXPECT().
+		GetEntityType(mock.Anything, mock.Anything, schemaID, mock.Anything).
+		Return(mockSchema, nil)
+
+	exporter, exists := suite.exportService.(*exportService).registry.Get(resourceTypeUserType)
+	assert.True(suite.T(), exists, "Entity type exporter should be registered")
+
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{schemaID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Test_Schema.yaml", files[0].FileName)
+	assert.Equal(suite.T(), resourceTypeUserType, files[0].ResourceType)
+	assert.Equal(suite.T(), schemaID, files[0].ResourceID)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_EmptyResourceIDs tests export with empty resource ID list.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_EmptyResourceIDs() {
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 0)
+	assert.Len(suite.T(), errors, 0)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_JSONFormatFallback tests that JSON format falls back to YAML.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_JSONFormatFallback() {
+	appID := testAppTestID
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "Test App",
+		Description: "Test Description",
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get(resourceTypeApplication)
+	options := &ExportOptions{
+		Format: formatJSON, // JSON not yet implemented
+	}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{appID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	// Should fall back to YAML format
+	assert.Equal(suite.T(), "Test_App.yaml", files[0].FileName)
+	assert.Contains(suite.T(), files[0].Content, "name: Test App")
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_Flow tests export with flow exporter.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_Flow() {
+	flowID := testFlowID
+	mockFlow := &providers.CompleteFlowDefinition{
+		ID:            flowID,
+		Handle:        "basic-auth-flow",
+		Name:          "Basic Authentication Flow",
+		FlowType:      providers.FlowType("AUTHENTICATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:        "start",
+				Type:      "START",
+				OnSuccess: "login",
+			},
+			{
+				ID:   "login",
+				Type: "BASIC_AUTHENTICATION",
+			},
+			{
+				ID:   "end",
+				Type: "END",
+			},
+		},
+		CreatedAt: "2025-12-22 10:00:00",
+		UpdatedAt: "2025-12-22 10:00:00",
+	}
+
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, flowID).Return(mockFlow, nil)
+
+	exporter, exists := suite.exportService.(*exportService).registry.Get("flow")
+	assert.True(suite.T(), exists, "Flow exporter should be registered")
+
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{flowID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Basic_Authentication_Flow.yaml", files[0].FileName)
+	assert.Equal(suite.T(), "flow", files[0].ResourceType)
+	assert.Equal(suite.T(), flowID, files[0].ResourceID)
+	assert.Contains(suite.T(), files[0].Content, "handle: basic-auth-flow")
+	assert.Contains(suite.T(), files[0].Content, "flowType: AUTHENTICATION")
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_FlowWithComplexMeta tests export with flow containing complex meta.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_FlowWithComplexMeta() {
+	flowID := "flow-with-meta"
+	complexMeta := map[string]interface{}{
+		"components": []interface{}{
+			map[string]interface{}{
+				"id":      "text_001",
+				"label":   "{{ t(signin:heading) }}",
+				"type":    "TEXT",
+				"variant": "HEADING_1",
+			},
+			map[string]interface{}{
+				"id":   "block_001",
+				"type": "BLOCK",
+				"components": []interface{}{
+					map[string]interface{}{
+						"id":          "input_001",
+						"label":       "Username",
+						"placeholder": "Enter username",
+						"ref":         "username",
+						"required":    true,
+						"type":        "TEXT_INPUT",
+					},
+					map[string]interface{}{
+						"id":          "input_002",
+						"label":       "Password",
+						"placeholder": "Enter password",
+						"ref":         "password",
+						"required":    true,
+						"type":        "PASSWORD_INPUT",
+					},
+				},
+			},
+		},
+		"theme": map[string]interface{}{
+			"primaryColor":   "#0066cc",
+			"secondaryColor": "#6c757d",
+		},
+	}
+
+	mockFlow := &providers.CompleteFlowDefinition{
+		ID:            flowID,
+		Handle:        "prompt-flow",
+		Name:          "Flow with Complex Meta",
+		FlowType:      providers.FlowType("AUTHENTICATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:        "start",
+				Type:      "START",
+				OnSuccess: "prompt",
+			},
+			{
+				ID:   "prompt",
+				Type: "PROMPT",
+				Meta: complexMeta,
+				Prompts: []providers.PromptDefinition{
+					{
+						Inputs: []providers.InputDefinition{
+							{Ref: "input_001", Type: "TEXT_INPUT", Identifier: "username", Required: true},
+							{Ref: "input_002", Type: "PASSWORD_INPUT", Identifier: "password", Required: true},
+						},
+						Action: &providers.ActionDefinition{Ref: "action_001", NextNode: "end"},
+					},
+				},
+			},
+			{
+				ID:   "end",
+				Type: "END",
+			},
+		},
+		CreatedAt: "2025-12-22 10:00:00",
+		UpdatedAt: "2025-12-22 10:00:00",
+	}
+
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, flowID).Return(mockFlow, nil)
+
+	exporter, exists := suite.exportService.(*exportService).registry.Get("flow")
+	assert.True(suite.T(), exists)
+
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{flowID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 1)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Flow_with_Complex_Meta.yaml", files[0].FileName)
+	assert.Contains(suite.T(), files[0].Content, "handle: prompt-flow")
+	assert.Contains(suite.T(), files[0].Content, "meta:")
+	// Meta should be present in some form (either as JSON string or YAML structure)
+	assert.Contains(suite.T(), files[0].Content, "prompt")
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_MultipleFlows tests exporting multiple flows.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_MultipleFlows() {
+	flow1 := &providers.CompleteFlowDefinition{
+		ID:            testFlow1ID,
+		Handle:        "flow-1",
+		Name:          "Flow One",
+		FlowType:      providers.FlowType("AUTHENTICATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{ID: "start", Type: "START"},
+			{ID: "end", Type: "END"},
+		},
+	}
+
+	flow2 := &providers.CompleteFlowDefinition{
+		ID:            testFlow2ID,
+		Handle:        "flow-2",
+		Name:          "Flow Two",
+		FlowType:      providers.FlowType("AUTHORIZATION"),
+		ActiveVersion: 2,
+		Nodes: []providers.NodeDefinition{
+			{ID: "start", Type: "START"},
+			{ID: "check", Type: "AUTHORIZATION_CHECK"},
+			{ID: "end", Type: "END"},
+		},
+	}
+
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, testFlow1ID).Return(flow1, nil)
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, testFlow2ID).Return(flow2, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get("flow")
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{testFlow1ID, testFlow2ID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 2)
+	assert.Len(suite.T(), errors, 0)
+	assert.Equal(suite.T(), "Flow_One.yaml", files[0].FileName)
+	assert.Equal(suite.T(), "Flow_Two.yaml", files[1].FileName)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_FlowNotFound tests export when flow is not found.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_FlowNotFound() {
+	flowID := "non-existent-flow"
+	flowError := &tidcommon.ServiceError{
+		Code:  "FLOW_NOT_FOUND",
+		Error: tidcommon.I18nMessage{DefaultValue: "Flow not found"},
+	}
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, flowID).Return(nil, flowError)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get("flow")
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{flowID}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 0)
+	assert.Len(suite.T(), errors, 1)
+	assert.Equal(suite.T(), "flow", errors[0].ResourceType)
+	assert.Equal(suite.T(), flowID, errors[0].ResourceID)
+	assert.Contains(suite.T(), errors[0].Error, "Flow not found")
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WildcardFlows tests wildcard export for flows.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WildcardFlows() {
+	flowList := &flowmgt.FlowListResponse{
+		TotalResults: 2,
+		StartIndex:   0,
+		Count:        2,
+		Flows: []flowmgt.BasicFlowDefinition{
+			{
+				ID:            testFlow1ID,
+				Handle:        "flow-1",
+				Name:          "Flow One",
+				FlowType:      providers.FlowType("AUTHENTICATION"),
+				ActiveVersion: 1,
+			},
+			{
+				ID:            testFlow2ID,
+				Handle:        "flow-2",
+				Name:          "Flow Two",
+				FlowType:      providers.FlowType("AUTHORIZATION"),
+				ActiveVersion: 1,
+			},
+		},
+	}
+
+	flow1Complete := &providers.CompleteFlowDefinition{
+		ID:            testFlow1ID,
+		Handle:        "flow-1",
+		Name:          "Flow One",
+		FlowType:      providers.FlowType("AUTHENTICATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{ID: "start", Type: "START"},
+			{ID: "end", Type: "END"},
+		},
+	}
+
+	flow2Complete := &providers.CompleteFlowDefinition{
+		ID:            testFlow2ID,
+		Handle:        "flow-2",
+		Name:          "Flow Two",
+		FlowType:      providers.FlowType("AUTHORIZATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{ID: "start", Type: "START"},
+			{ID: "end", Type: "END"},
+		},
+	}
+
+	suite.mockFlowService.EXPECT().ListFlows(mock.Anything, 10000, 0, providers.FlowType("")).Return(flowList, nil)
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, testFlow1ID).Return(flow1Complete, nil)
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, testFlow2ID).Return(flow2Complete, nil)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get("flow")
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{"*"}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 2)
+	assert.Len(suite.T(), errors, 0)
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResourcesWithExporter_WildcardFlows_ListFailure tests wildcard when ListFlows fails.
+func (suite *ExportServiceTestSuite) TestExportResourcesWithExporter_WildcardFlows_ListFailure() {
+	dbError := &tidcommon.ServiceError{
+		Code:  "DB_ERROR",
+		Error: tidcommon.I18nMessage{DefaultValue: "Database error"},
+	}
+	suite.mockFlowService.EXPECT().ListFlows(mock.Anything, 10000, 0, providers.FlowType("")).Return(nil, dbError)
+
+	exporter, _ := suite.exportService.(*exportService).registry.Get("flow")
+	options := &ExportOptions{Format: formatYAML}
+
+	files, variables, errors := suite.exportService.(*exportService).exportResourcesWithExporter(context.Background(),
+		exporter, []string{"*"}, options, suite.varNames())
+
+	assert.Len(suite.T(), files, 0)
+	assert.Len(suite.T(), errors, 0) // Empty list on error
+	assert.Empty(suite.T(), variables)
+}
+
+// TestExportResources_FlowOnly tests exporting only flows via main ExportResources method.
+func (suite *ExportServiceTestSuite) TestExportResources_FlowOnly() {
+	flowID := testFlowID
+	mockFlow := &providers.CompleteFlowDefinition{
+		ID:            flowID,
+		Handle:        "test-flow",
+		Name:          "Test Flow",
+		FlowType:      providers.FlowType("AUTHENTICATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{ID: "start", Type: "START"},
+			{ID: "end", Type: "END"},
+		},
+		CreatedAt: "2025-12-22 10:00:00",
+		UpdatedAt: "2025-12-22 10:00:00",
+	}
+
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, flowID).Return(mockFlow, nil)
+
+	request := &ExportRequest{
+		Flows: []string{flowID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	response, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), response)
+	assert.Len(suite.T(), response.Files, 1)
+	assert.Equal(suite.T(), "Test_Flow.yaml", response.Files[0].FileName)
+	assert.Contains(suite.T(), response.Files[0].Content, "handle: test-flow")
+	assert.Equal(suite.T(), 1, response.Summary.TotalFiles)
+	assert.Len(suite.T(), response.Summary.Errors, 0)
+}
+
+// TestExportResources_MixedWithFlows tests exporting flows along with other resources.
+func (suite *ExportServiceTestSuite) TestExportResources_MixedWithFlows() {
+	appID := testAppID
+	flowID := testFlowID
+
+	mockApp := &providers.Application{
+		ID:          appID,
+		Name:        "Test App",
+		Description: "Test Description",
+	}
+
+	mockFlow := &providers.CompleteFlowDefinition{
+		ID:            flowID,
+		Handle:        "test-flow",
+		Name:          "Test Flow",
+		FlowType:      providers.FlowType("AUTHENTICATION"),
+		ActiveVersion: 1,
+		Nodes: []providers.NodeDefinition{
+			{ID: "start", Type: "START"},
+			{ID: "end", Type: "END"},
+		},
+	}
+
+	suite.appServiceMock.EXPECT().GetApplication(mock.Anything, appID).Return(mockApp, nil)
+	suite.mockFlowService.EXPECT().GetFlow(mock.Anything, flowID).Return(mockFlow, nil)
+
+	request := &ExportRequest{
+		Applications: []string{appID},
+		Flows:        []string{flowID},
+		Options: &ExportOptions{
+			Format: "yaml",
+		},
+	}
+
+	response, err := suite.exportService.ExportResources(context.Background(), request)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), response)
+	assert.Len(suite.T(), response.Files, 2)
+	assert.Equal(suite.T(), 2, response.Summary.TotalFiles)
+	assert.Len(suite.T(), response.Summary.Errors, 0)
+
+	// Verify we have both types
+	var hasApp, hasFlow bool
+	for _, file := range response.Files {
+		if file.ResourceType == resourceTypeApplication {
+			hasApp = true
+		}
+		if file.ResourceType == resourceTypeFlow {
+			hasFlow = true
+		}
+	}
+	assert.True(suite.T(), hasApp, "Should have application export")
+	assert.True(suite.T(), hasFlow, "Should have flow export")
+}

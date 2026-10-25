@@ -1,0 +1,147 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package config
+
+import (
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+)
+
+type RuntimeConfigTestSuite struct {
+	suite.Suite
+}
+
+func TestRuntimeConfigSuite(t *testing.T) {
+	suite.Run(t, new(RuntimeConfigTestSuite))
+}
+
+func (suite *RuntimeConfigTestSuite) BeforeTest(suiteName, testName string) {
+	runtimeConfig = nil
+	once = sync.Once{}
+}
+
+func (suite *RuntimeConfigTestSuite) TestInitializeServerRuntime() {
+	config := &Config{
+		Server: engineconfig.ServerConfig{
+			Hostname: "testhost",
+			Port:     9000,
+		},
+		TLS: TLSConfig{
+			CertFile: "test-cert.pem",
+			KeyFile:  "test-key.pem",
+		},
+	}
+
+	err := InitializeServerRuntime("/test/thunderid/home", config)
+
+	assert.NoError(suite.T(), err)
+
+	runtime := runtimeConfig
+	assert.NotNil(suite.T(), runtime)
+	assert.Equal(suite.T(), "/test/thunderid/home", runtime.ServerHome)
+	assert.Equal(suite.T(), config.Server.Hostname, runtime.Config.Server.Hostname)
+	assert.Equal(suite.T(), config.Server.Port, runtime.Config.Server.Port)
+	assert.Equal(suite.T(), config.TLS.CertFile, runtime.Config.TLS.CertFile)
+}
+
+func (suite *RuntimeConfigTestSuite) TestInitializeServerRuntimeOnlyOnce() {
+	// First initialization
+	firstConfig := &Config{
+		Server: engineconfig.ServerConfig{
+			Hostname: "firsthost",
+			Port:     8000,
+		},
+	}
+
+	err := InitializeServerRuntime("/first/path", firstConfig)
+	assert.NoError(suite.T(), err)
+
+	// Try second initialization
+	secondConfig := &Config{
+		Server: engineconfig.ServerConfig{
+			Hostname: "secondhost",
+			Port:     9000,
+		},
+	}
+
+	err = InitializeServerRuntime("/second/path", secondConfig)
+	assert.NoError(suite.T(), err) // Should not return error
+
+	// Verify that the first initialization remains
+	runtime := GetServerRuntime()
+	assert.Equal(suite.T(), "/first/path", runtime.ServerHome)
+	assert.Equal(suite.T(), "firsthost", runtime.Config.Server.Hostname)
+	assert.Equal(suite.T(), 8000, runtime.Config.Server.Port)
+}
+
+func (suite *RuntimeConfigTestSuite) TestGetServerRuntime() {
+	config := &Config{
+		Server: engineconfig.ServerConfig{
+			Hostname: "gettest",
+			Port:     8888,
+		},
+	}
+
+	err := InitializeServerRuntime("/get/test/path", config)
+	assert.NoError(suite.T(), err)
+
+	runtime := GetServerRuntime()
+
+	assert.NotNil(suite.T(), runtime)
+	assert.Equal(suite.T(), "/get/test/path", runtime.ServerHome)
+	assert.Equal(suite.T(), "gettest", runtime.Config.Server.Hostname)
+}
+
+func (suite *RuntimeConfigTestSuite) TestGetServerRuntimePanic() {
+	runtimeConfig = nil
+
+	assert.Panics(suite.T(), func() {
+		GetServerRuntime()
+	})
+}
+
+func (suite *RuntimeConfigTestSuite) TestInitializeServerRuntime_InvalidLoginPathFallback() {
+	// Setup a config with an intentionally broken LoginPath
+	config := &Config{}
+	config.GateClient.Scheme = "https"
+	config.GateClient.Hostname = "localhost"
+	config.GateClient.Port = 8443
+	config.GateClient.LoginPath = "/login%ZZ"
+
+	err := InitializeServerRuntime("/test/thunderid/home", config)
+
+	assert.NoError(suite.T(), err)
+
+	runtime := GetServerRuntime()
+	assert.NotNil(suite.T(), runtime)
+	assert.NotNil(suite.T(), runtime.GateClientLoginURL)
+
+	assert.Equal(suite.T(), "/signin", runtime.GateClientLoginURL.Path)
+	assert.Equal(suite.T(), "https://localhost:8443/signin", runtime.GateClientLoginURL.String())
+}
+
+func (suite *RuntimeConfigTestSuite) TestInitializeServerRuntime_InvalidCallbackPathFallback() {
+	// Setup a config with an intentionally broken CallbackPath
+	config := &Config{}
+	config.GateClient.Scheme = "https"
+	config.GateClient.Hostname = "localhost"
+	config.GateClient.Port = 8443
+	config.GateClient.CallbackPath = "/callback%ZZ"
+
+	err := InitializeServerRuntime("/test/thunderid/home", config)
+
+	assert.NoError(suite.T(), err)
+
+	runtime := GetServerRuntime()
+	assert.NotNil(suite.T(), runtime)
+	assert.NotNil(suite.T(), runtime.GateClientCallbackURL)
+
+	assert.Equal(suite.T(), "/callback", runtime.GateClientCallbackURL.Path)
+	assert.Equal(suite.T(), "https://localhost:8443/callback", runtime.GateClientCallbackURL.String())
+}

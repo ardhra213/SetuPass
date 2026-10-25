@@ -1,0 +1,116 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package otp
+
+import (
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+)
+
+// Client errors for OTP authentication service
+var (
+	// ErrorInvalidSenderID is the error returned when the provided sender ID is invalid.
+	ErrorInvalidSenderID = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1001",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_sender_id",
+			DefaultValue: "Invalid sender ID",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_sender_id_description",
+			DefaultValue: "The provided sender ID is invalid or empty",
+		},
+	}
+	// ErrorInvalidRecipient is the error returned when the provided recipient is invalid.
+	ErrorInvalidRecipient = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1002",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_recipient",
+			DefaultValue: "Invalid recipient",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_recipient_description",
+			DefaultValue: "The provided recipient is invalid or empty",
+		},
+	}
+	// ErrorUnsupportedChannel is the error returned when the provided channel is not supported.
+	ErrorUnsupportedChannel = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1003",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.unsupported_channel",
+			DefaultValue: "Unsupported channel",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.unsupported_channel_description",
+			DefaultValue: "The provided channel is not supported for OTP authentication",
+		},
+	}
+	// ErrorInvalidSessionToken is the error returned when the provided session token is invalid.
+	ErrorInvalidSessionToken = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1004",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_session_token",
+			DefaultValue: "Invalid session token",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_session_token_description",
+			DefaultValue: "The provided session token is invalid or empty",
+		},
+	}
+	// ErrorInvalidOTP is the error returned when the provided OTP is invalid.
+	ErrorInvalidOTP = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1005",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_otp",
+			DefaultValue: "Invalid OTP",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.invalid_otp_description",
+			DefaultValue: "The provided OTP is invalid or empty",
+		},
+	}
+	// ErrorIncorrectOTP is the error returned when the provided OTP is incorrect or has expired.
+	ErrorIncorrectOTP = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1006",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.incorrect_otp",
+			DefaultValue: "Incorrect OTP",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.incorrect_otp_description",
+			DefaultValue: "The provided OTP is incorrect or has expired",
+		},
+	}
+	// ErrorClientErrorFromOTPService is the error returned when there is a client error from the OTP service.
+	ErrorClientErrorFromOTPService = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1007",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.error_processing_otp",
+			DefaultValue: "Error processing OTP",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.error_processing_otp_description",
+			DefaultValue: "An error occurred while processing the OTP request",
+		},
+	}
+	// ErrorClientErrorWhileResolvingUser is the error returned when there is a client error while resolving the user.
+	ErrorClientErrorWhileResolvingUser = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-OTP-1008",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.error_resolving_user",
+			DefaultValue: "Error resolving user",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnotpservice.error_resolving_user_description",
+			DefaultValue: "An error occurred while resolving the user for the recipient",
+		},
+	}
+)

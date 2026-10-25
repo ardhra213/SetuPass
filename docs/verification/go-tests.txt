@@ -1,0 +1,25 @@
+ok  	github.com/mosip/esignet/internal/engine	2.822s
+ok  	github.com/mosip/esignet/internal/clientmgmt	1.092s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/authz	1.132s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/authz/requestvalidator	1.032s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/callback	1.033s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/ciba	1.098s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/clientauth	3.227s
+?   	github.com/thunder-id/thunderid/internal/oauth/oauth2/constants	[no test files]
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/dcr	1.061s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/discovery	1.032s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop	2.771s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/granthandlers	1.245s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/introspect	1.048s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/jti	1.023s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/jwksresolver	2.311s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/logout	1.062s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/model	1.018s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/par	1.048s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/pkce	1.022s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/resourceindicators	1.027s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/revocation	1.077s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/token	1.062s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/tokenservice	1.621s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/userinfo	5.528s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/utils	1.056s

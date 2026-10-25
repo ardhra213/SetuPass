@@ -1,0 +1,590 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package group
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
+	entitystore "github.com/thunder-id/thunderid/internal/system/declarative_resource/entity"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/transaction"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+type fileBasedGroupStore struct {
+	*declarativeresource.GenericFileBasedStore
+}
+
+// newFileBasedGroupStore creates a new file-based store for groups.
+func newFileBasedGroupStore() (groupStoreInterface, providers.Transactioner) {
+	return &fileBasedGroupStore{
+		GenericFileBasedStore: declarativeresource.NewGenericFileBasedStore(entitystore.KeyTypeGroup),
+	}, transaction.NewNoOpTransactioner()
+}
+
+// Create implements declarativeresource.Storer interface for resource loader.
+func (f *fileBasedGroupStore) Create(id string, data interface{}) error {
+	grp, ok := data.(*groupDeclarativeResource)
+	if !ok {
+		return ErrGroupDataCorrupted
+	}
+	if grp.ID == "" {
+		grp.ID = id
+	}
+	return f.GenericFileBasedStore.Create(id, grp)
+}
+
+// GetGroupListCount returns the total count of groups in the file-based store.
+func (f *fileBasedGroupStore) GetGroupListCount(ctx context.Context) (int, error) {
+	return f.GenericFileBasedStore.Count()
+}
+
+// GetGroupList returns a paginated list of root groups from the file-based store.
+func (f *fileBasedGroupStore) GetGroupList(ctx context.Context, limit, offset int) ([]GroupBasicDAO, error) {
+	if limit <= 0 {
+		return []GroupBasicDAO{}, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]GroupBasicDAO, 0, len(list))
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			log.GetLogger().Warn(ctx, "Skipping malformed group in GetGroupList",
+				log.String("groupID", item.ID.ID),
+				log.Error(err))
+			continue
+		}
+		groups = append(groups, GroupBasicDAO{
+			ID:          grpData.ID,
+			Name:        grpData.Name,
+			Description: grpData.Description,
+			OUID:        grpData.OUID,
+			IsReadOnly:  true,
+		})
+	}
+
+	start := offset
+	if start >= len(groups) {
+		return []GroupBasicDAO{}, nil
+	}
+	end := start + limit
+	if end > len(groups) {
+		end = len(groups)
+	}
+
+	return groups[start:end], nil
+}
+
+// GetGroupListCountByOUIDs returns the count of groups belonging to any of the given OUs.
+func (f *fileBasedGroupStore) GetGroupListCountByOUIDs(ctx context.Context, ouIDs []string) (int, error) {
+	if len(ouIDs) == 0 {
+		return 0, nil
+	}
+
+	ouSet := make(map[string]bool, len(ouIDs))
+	for _, id := range ouIDs {
+		ouSet[id] = true
+	}
+
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		if ouSet[grpData.OUID] {
+			count++
+		}
+	}
+
+	return count, nil
+}
+
+// GetGroupListByOUIDs returns a paginated list of groups belonging to any of the given OUs.
+func (f *fileBasedGroupStore) GetGroupListByOUIDs(
+	ctx context.Context, ouIDs []string, limit, offset int,
+) ([]GroupBasicDAO, error) {
+	if len(ouIDs) == 0 {
+		return []GroupBasicDAO{}, nil
+	}
+
+	ouSet := make(map[string]bool, len(ouIDs))
+	for _, id := range ouIDs {
+		ouSet[id] = true
+	}
+
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]GroupBasicDAO, 0)
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		if ouSet[grpData.OUID] {
+			groups = append(groups, GroupBasicDAO{
+				ID:          grpData.ID,
+				Name:        grpData.Name,
+				Description: grpData.Description,
+				OUID:        grpData.OUID,
+				IsReadOnly:  true,
+			})
+		}
+	}
+
+	if limit <= 0 {
+		return []GroupBasicDAO{}, nil
+	}
+	start := offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(groups) {
+		return []GroupBasicDAO{}, nil
+	}
+	end := start + limit
+	if end > len(groups) {
+		end = len(groups)
+	}
+
+	return groups[start:end], nil
+}
+
+// CreateGroup is not supported in file-based store.
+func (f *fileBasedGroupStore) CreateGroup(ctx context.Context, group GroupDAO) error {
+	return errors.New("CreateGroup is not supported in file-based store")
+}
+
+// GetGroup returns a group from the file-based store.
+func (f *fileBasedGroupStore) GetGroup(ctx context.Context, id string) (GroupDAO, error) {
+	data, err := f.GenericFileBasedStore.Get(id)
+	if err != nil {
+		if isGroupNotFoundError(err) {
+			return GroupDAO{}, ErrGroupNotFound
+		}
+		return GroupDAO{}, err
+	}
+
+	grpData, err := groupFromDeclarativeData(id, data)
+	if err != nil {
+		return GroupDAO{}, err
+	}
+
+	members := append([]Member{}, grpData.Members...)
+
+	return GroupDAO{
+		ID:          grpData.ID,
+		Name:        grpData.Name,
+		Description: grpData.Description,
+		OUID:        grpData.OUID,
+		Members:     members,
+		IsReadOnly:  true,
+	}, nil
+}
+
+// GetGroupMembers returns members of a group with pagination.
+func (f *fileBasedGroupStore) GetGroupMembers(
+	ctx context.Context, groupID string, limit, offset int,
+) ([]Member, error) {
+	if limit <= 0 {
+		return []Member{}, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	data, err := f.GenericFileBasedStore.Get(groupID)
+	if err != nil {
+		if isGroupNotFoundError(err) {
+			return []Member{}, nil
+		}
+		return nil, err
+	}
+
+	grpData, err := groupFromDeclarativeData(groupID, data)
+	if err != nil {
+		return nil, err
+	}
+
+	members := grpData.Members
+	start := offset
+	if start >= len(members) {
+		return []Member{}, nil
+	}
+	end := start + limit
+	if end > len(members) {
+		end = len(members)
+	}
+
+	return members[start:end], nil
+}
+
+// GetGroupMemberCount returns the total count of members in a group.
+func (f *fileBasedGroupStore) GetGroupMemberCount(ctx context.Context, groupID string) (int, error) {
+	data, err := f.GenericFileBasedStore.Get(groupID)
+	if err != nil {
+		if isGroupNotFoundError(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	grpData, err := groupFromDeclarativeData(groupID, data)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(grpData.Members), nil
+}
+
+// UpdateGroup is not supported in file-based store.
+func (f *fileBasedGroupStore) UpdateGroup(ctx context.Context, group GroupDAO) error {
+	return errors.New("UpdateGroup is not supported in file-based store")
+}
+
+// DeleteGroup is not supported in file-based store.
+func (f *fileBasedGroupStore) DeleteGroup(ctx context.Context, id string) error {
+	return errors.New("DeleteGroup is not supported in file-based store")
+}
+
+// ValidateGroupIDs checks which of the given group IDs do not exist in the file-based store.
+func (f *fileBasedGroupStore) ValidateGroupIDs(ctx context.Context, groupIDs []string) ([]string, error) {
+	if len(groupIDs) == 0 {
+		return []string{}, nil
+	}
+
+	var invalid []string
+	for _, id := range groupIDs {
+		_, err := f.GenericFileBasedStore.Get(id)
+		if err != nil {
+			if isGroupNotFoundError(err) {
+				invalid = append(invalid, id)
+				continue
+			}
+			return nil, err
+		}
+	}
+
+	return invalid, nil
+}
+
+// CheckGroupNameConflictForCreate checks if a group with the given name already exists in the OU.
+func (f *fileBasedGroupStore) CheckGroupNameConflictForCreate(
+	ctx context.Context, name string, oUID string,
+) error {
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return err
+	}
+
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		if grpData.OUID == oUID && grpData.Name == name {
+			return ErrGroupNameConflict
+		}
+	}
+
+	return nil
+}
+
+// CheckGroupNameConflictForUpdate checks for a name conflict excluding the group being updated.
+func (f *fileBasedGroupStore) CheckGroupNameConflictForUpdate(
+	ctx context.Context, name string, oUID string, groupID string,
+) error {
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return err
+	}
+
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		if grpData.ID == groupID {
+			continue
+		}
+		if grpData.OUID == oUID && grpData.Name == name {
+			return ErrGroupNameConflict
+		}
+	}
+
+	return nil
+}
+
+// GetGroupsByOrganizationUnitCount returns the count of groups in the given OU.
+func (f *fileBasedGroupStore) GetGroupsByOrganizationUnitCount(ctx context.Context, oUID string) (int, error) {
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		if grpData.OUID == oUID {
+			count++
+		}
+	}
+
+	return count, nil
+}
+
+// GetGroupsByOrganizationUnit returns a paginated list of groups in the given OU.
+func (f *fileBasedGroupStore) GetGroupsByOrganizationUnit(
+	ctx context.Context, oUID string, limit, offset int,
+) ([]GroupBasicDAO, error) {
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]GroupBasicDAO, 0)
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		if grpData.OUID == oUID {
+			groups = append(groups, GroupBasicDAO{
+				ID:          grpData.ID,
+				Name:        grpData.Name,
+				Description: grpData.Description,
+				OUID:        grpData.OUID,
+				IsReadOnly:  true,
+			})
+		}
+	}
+
+	if limit <= 0 {
+		return []GroupBasicDAO{}, nil
+	}
+	start := offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(groups) {
+		return []GroupBasicDAO{}, nil
+	}
+	end := start + limit
+	if end > len(groups) {
+		end = len(groups)
+	}
+
+	return groups[start:end], nil
+}
+
+// AddGroupMembers is not supported in file-based store.
+func (f *fileBasedGroupStore) AddGroupMembers(ctx context.Context, groupID string, members []Member) error {
+	return errors.New("AddGroupMembers is not supported in file-based store")
+}
+
+// RemoveGroupMembers is not supported in file-based store.
+func (f *fileBasedGroupStore) RemoveGroupMembers(ctx context.Context, groupID string, members []Member) error {
+	return errors.New("RemoveGroupMembers is not supported in file-based store")
+}
+
+// DeleteMembershipsByMember is a no-op for the file-based store: declarative groups hold no mutable
+// runtime memberships to cascade-delete, so there is nothing to remove.
+func (f *fileBasedGroupStore) DeleteMembershipsByMember(
+	_ context.Context, _, _ string) (int64, error) {
+	return 0, nil
+}
+
+// GetGroupsByIDs returns groups matching any of the given IDs.
+func (f *fileBasedGroupStore) GetGroupsByIDs(ctx context.Context, groupIDs []string) ([]GroupBasicDAO, error) {
+	if len(groupIDs) == 0 {
+		return []GroupBasicDAO{}, nil
+	}
+
+	wanted := make(map[string]bool, len(groupIDs))
+	for _, id := range groupIDs {
+		wanted[id] = true
+	}
+
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]GroupBasicDAO, 0, len(groupIDs))
+	for _, item := range list {
+		if !wanted[item.ID.ID] {
+			continue
+		}
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			log.GetLogger().Warn(ctx, "Skipping malformed group in GetGroupsByIDs",
+				log.String("groupID", item.ID.ID),
+				log.Error(err))
+			continue
+		}
+		groups = append(groups, GroupBasicDAO{
+			ID:          grpData.ID,
+			Name:        grpData.Name,
+			Description: grpData.Description,
+			OUID:        grpData.OUID,
+			IsReadOnly:  true,
+		})
+	}
+
+	return groups, nil
+}
+
+// IsGroupDeclarative returns true for all groups in the file-based store.
+func (f *fileBasedGroupStore) IsGroupDeclarative(ctx context.Context, id string) (bool, error) {
+	_, err := f.GenericFileBasedStore.Get(id)
+	if err != nil {
+		if isGroupNotFoundError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// groupFromDeclarativeData converts raw data from the declarative store to a groupDeclarativeResource.
+func groupFromDeclarativeData(id string, data interface{}) (groupDeclarativeResource, error) {
+	grp, ok := data.(*groupDeclarativeResource)
+	if !ok || grp == nil {
+		declarativeresource.LogTypeAssertionError("group", id)
+		return groupDeclarativeResource{}, ErrGroupDataCorrupted
+	}
+	return *grp, nil
+}
+
+// GetTransitiveGroupsForEntity returns all declarative groups that have the given entity as a
+// member, including groups reachable through nested MemberTypeGroup edges. A BFS walk is used to
+// follow group-to-group references; a visited set prevents infinite loops on cyclic group graphs.
+func (f *fileBasedGroupStore) GetTransitiveGroupsForEntity(
+	ctx context.Context, entityID string,
+) ([]providers.EntityGroup, error) {
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	// Build an ID-keyed lookup so BFS can find parent groups in O(1).
+	allGroups := make(map[string]groupDeclarativeResource, len(list))
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			continue
+		}
+		allGroups[grpData.ID] = grpData
+	}
+
+	visited := make(map[string]bool)
+	result := make([]providers.EntityGroup, 0)
+
+	// Seed: groups that directly contain entityID as a non-group member.
+	queue := make([]string, 0)
+	for _, grp := range allGroups {
+		for _, member := range grp.Members {
+			if member.Type != MemberTypeGroup && member.ID == entityID {
+				if !visited[grp.ID] {
+					visited[grp.ID] = true
+					queue = append(queue, grp.ID)
+					result = append(result, providers.EntityGroup{ID: grp.ID, Name: grp.Name, OUID: grp.OUID})
+				}
+				break
+			}
+		}
+	}
+
+	// BFS: walk MemberTypeGroup edges upward to parent groups.
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+		for _, grp := range allGroups {
+			if visited[grp.ID] {
+				continue
+			}
+			for _, member := range grp.Members {
+				if member.Type == MemberTypeGroup && member.ID == currentID {
+					visited[grp.ID] = true
+					queue = append(queue, grp.ID)
+					result = append(result, providers.EntityGroup{ID: grp.ID, Name: grp.Name, OUID: grp.OUID})
+					break
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GetDirectGroupParents retrieves the IDs of declarative groups that directly contain any of the
+// given groups as a nested member.
+func (f *fileBasedGroupStore) GetDirectGroupParents(
+	ctx context.Context, groupIDs []string,
+) ([]string, error) {
+	if len(groupIDs) == 0 {
+		return []string{}, nil
+	}
+
+	list, err := f.GenericFileBasedStore.List()
+	if err != nil {
+		return nil, err
+	}
+
+	wanted := make(map[string]bool, len(groupIDs))
+	for _, id := range groupIDs {
+		wanted[id] = true
+	}
+
+	parents := make([]string, 0)
+	for _, item := range list {
+		grpData, err := groupFromDeclarativeData(item.ID.ID, item.Data)
+		if err != nil {
+			// Return the error rather than skipping: a skipped entry could be a parent, and this
+			// result feeds an authorization decision. GetTransitiveGroupsForEntity keeps skipping,
+			// since it feeds listings.
+			return nil, fmt.Errorf("declarative group %q could not be parsed while resolving "+
+				"group ancestors: %w", item.ID.ID, err)
+		}
+		for _, member := range grpData.Members {
+			if member.Type == MemberTypeGroup && wanted[member.ID] {
+				parents = append(parents, grpData.ID)
+				break
+			}
+		}
+	}
+	return parents, nil
+}
+
+// isGroupNotFoundError checks whether the error signals a missing entity.
+func isGroupNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return msg == "entity not found" || strings.Contains(msg, "not found")
+}

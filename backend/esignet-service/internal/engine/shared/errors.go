@@ -1,0 +1,194 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+// Package shared provides common types and errors for authentication providers.
+package shared
+
+import "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+// NotImplementedError is returned when a feature is not implemented.
+var NotImplementedError = &common.ServiceError{
+	Code: "not_implemented",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "not_implemented",
+		DefaultValue: "Not implemented",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "not_implemented_description",
+		DefaultValue: "The feature is not implemented",
+	},
+}
+
+// ClientNotFoundError is returned when a client is not found.
+var ClientNotFoundError = &common.ServiceError{
+	Code: "client_not_found",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "client_not_found",
+		DefaultValue: "Client not found",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "client_not_found_description",
+		DefaultValue: "The client with the given ID was not found",
+	},
+}
+
+// InvalidIndividualIDError is returned when the individual_id in identifiers is missing or invalid.
+var InvalidIndividualIDError = &common.ServiceError{
+	Code: "AUTHN-MGR-1007",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "missing_or_invalid_individual_id",
+		DefaultValue: "Missing or invalid individual_id in identifiers",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "missing_or_invalid_individual_id_description",
+		DefaultValue: "The individual_id in identifiers is missing or invalid",
+	},
+}
+
+// InvalidRequestError is returned when the request is invalid.
+var InvalidRequestError = &common.ServiceError{
+	Code: "AUTHN-MGR-1008",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "invalid_request",
+		DefaultValue: "Invalid request",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "invalid_request_description",
+		DefaultValue: "The request is invalid",
+	},
+}
+
+// AuthenticationFailedError is returned when the authentication failed.
+var AuthenticationFailedError = &common.ServiceError{
+	Code: "AUTHN-MGR-1001",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "authentication_failed",
+		DefaultValue: "Authentication failed",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "authentication_failed_description",
+		DefaultValue: "The authentication failed with the given credentials",
+	},
+}
+
+// SendOTPFailedError is returned when the send OTP failed.
+var SendOTPFailedError = &common.ServiceError{
+	Code: "send_otp_failed",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "send_otp_failed",
+		DefaultValue: "Send OTP failed",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "send_otp_failed_description",
+		DefaultValue: "The send OTP failed with the given credentials",
+	},
+}
+
+// MaxOTPAttemptsReachedError is returned when the maximum number of OTP generation/resend
+// attempts has been reached for a flow session.
+var MaxOTPAttemptsReachedError = &common.ServiceError{
+	Code: "max_otp_attempts_reached",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "flows.executor.errors.max_otp_attempts_reached",
+		DefaultValue: "Maximum OTP attempts reached",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "flows.executor.errors.max_otp_attempts_reached_desc",
+		DefaultValue: "The maximum number of OTP verification attempts has been reached",
+	},
+}
+
+// MissingEncryptionKeyAlgError is returned when a client's userinfo response
+// type is JWE but its encryption key has no alg field.
+var MissingEncryptionKeyAlgError = &common.ServiceError{
+	Code: "missing_encryption_key_alg",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "missing_encryption_key_alg",
+		DefaultValue: "Missing encryption key alg",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "missing_encryption_key_alg_description",
+		DefaultValue: "The client's encryption key does not have an alg field",
+	},
+}
+
+// FileNotFoundError is returned when a required configuration file is not found.
+var FileNotFoundError = &common.ServiceError{
+	Code: "file_not_found",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "file_not_found",
+		DefaultValue: "File not found",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "file_not_found_description",
+		DefaultValue: "The file with the given ID was not found",
+	},
+}
+
+// FileUnmarshallError is returned when a configuration file cannot be unmarshalled.
+var FileUnmarshallError = &common.ServiceError{
+	Code: "file_unmarshall_error",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "file_unmarshall_error",
+		DefaultValue: "File unmarshall error",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "file_unmarshall_error_description",
+		DefaultValue: "The file could not be unmarshalled",
+	},
+}
+
+// CertificateFetchFailed is returned when a failed to fetch certificate from IDA.
+var CertificateFetchFailed = &common.ServiceError{
+	Code: "certificate_fetch_failed",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "certificate_fetch_failed",
+		DefaultValue: "Certificate fetch failed",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "certificate_fetch_failed_description",
+		DefaultValue: "The certificate could not be fetched",
+	},
+}
+
+// AuthTokenFetchFailed is returned when a failed to fetch auth token from authmanager.
+var AuthTokenFetchFailed = &common.ServiceError{
+	Code: "auth_token_fetch_failed",
+	Type: common.ClientErrorType,
+	Error: common.I18nMessage{
+		Key:          "auth_token_fetch_failed",
+		DefaultValue: "Auth token fetch failed",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "auth_token_fetch_failed_description",
+		DefaultValue: "The auth token could not be fetched",
+	},
+}
+
+// InternalServerError is returned when an unexpected server-side failure occurs.
+var InternalServerError = &common.ServiceError{
+	Code: "server_error",
+	Type: common.ServerErrorType,
+	Error: common.I18nMessage{
+		Key:          "server_error",
+		DefaultValue: "Internal server error",
+	},
+	ErrorDescription: common.I18nMessage{
+		Key:          "server_error_description",
+		DefaultValue: "An unexpected error occurred while processing the request",
+	},
+}

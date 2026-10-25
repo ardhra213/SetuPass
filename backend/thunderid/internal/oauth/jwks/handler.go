@@ -1,0 +1,60 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package jwks
+
+import (
+	"context"
+	"net/http"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	"github.com/thunder-id/thunderid/internal/system/error/apierror"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	sysutils "github.com/thunder-id/thunderid/internal/system/utils"
+)
+
+// jwksHandler handles requests for the JSON Web Key Set (JWKS).
+type jwksHandler struct {
+	jwksService JWKSServiceInterface
+}
+
+// newJWKSHandler creates a new instance of jwksHandler.
+func newJWKSHandler(jwksService JWKSServiceInterface) *jwksHandler {
+	return &jwksHandler{
+		jwksService: jwksService,
+	}
+}
+
+// HandleJWKSRequest handles the HTTP request to retrieve the JSON Web Key Set (JWKS).
+func (h *jwksHandler) HandleJWKSRequest(w http.ResponseWriter, r *http.Request) {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "JWKSHandler"))
+
+	ctx := r.Context()
+	jwksResponse, svcErr := h.jwksService.GetJWKS(ctx)
+	if svcErr != nil {
+		h.logAndWriteError(ctx, w, logger, svcErr)
+		return
+	}
+
+	sysutils.WriteSuccessResponse(ctx, w, http.StatusOK, jwksResponse)
+	logger.Debug(ctx, "JWKS response successfully sent")
+}
+
+// logAndWriteError logs server errors and writes an appropriate error response to the HTTP response writer.
+func (h *jwksHandler) logAndWriteError(ctx context.Context, w http.ResponseWriter, logger *log.Logger,
+	svcErr *tidcommon.ServiceError) {
+	statusCode := http.StatusBadRequest
+	if svcErr.Type == tidcommon.ServerErrorType {
+		statusCode = http.StatusInternalServerError
+		logger.Error(ctx, "Failed to retrieve JWKS", log.String("error_code", svcErr.Code))
+	}
+
+	errResp := apierror.ErrorResponse{
+		Code:        svcErr.Code,
+		Message:     svcErr.Error,
+		Description: svcErr.ErrorDescription,
+	}
+
+	sysutils.WriteErrorResponse(ctx, w, statusCode, errResp)
+}

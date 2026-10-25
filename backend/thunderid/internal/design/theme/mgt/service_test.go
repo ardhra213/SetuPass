@@ -1,0 +1,681 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package thememgt
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+)
+
+// Test Suite
+type ThemeServiceTestSuite struct {
+	suite.Suite
+	mockStore *themeMgtStoreInterfaceMock
+	service   ThemeMgtServiceInterface
+}
+
+func TestThemeServiceTestSuite(t *testing.T) {
+	suite.Run(t, new(ThemeServiceTestSuite))
+}
+
+func (suite *ThemeServiceTestSuite) SetupTest() {
+	// Initialize config runtime with default values
+	testConfig := &config.Config{
+		DeclarativeResources: config.DeclarativeResources{
+			Enabled: false,
+		},
+	}
+	config.ResetServerRuntime()
+	err := config.InitializeServerRuntime("/tmp/test", testConfig)
+	if err != nil {
+		suite.Fail("Failed to initialize runtime", err)
+	}
+
+	suite.mockStore = newThemeMgtStoreInterfaceMock(suite.T())
+	suite.service = newThemeMgtService(suite.mockStore)
+}
+
+// Test GetThemeList - Success
+func (suite *ThemeServiceTestSuite) TestGetThemeList_Success() {
+	themes := []Theme{
+		{
+			ID:          "theme-1",
+			DisplayName: "Classic Theme",
+			Description: "A classic theme",
+			Theme:       json.RawMessage(`{"colors": {"primary": "#007bff"}}`),
+		},
+		{
+			ID:          "theme-2",
+			DisplayName: "Dark Theme",
+			Description: "A dark theme",
+			Theme:       json.RawMessage(`{"colors": {"primary": "#000000"}}`),
+		},
+	}
+
+	suite.mockStore.On("GetThemeListCount").Return(2, nil)
+	suite.mockStore.On("GetThemeList", 10, 0).Return(themes, nil)
+
+	result, err := suite.service.GetThemeList(context.Background(), 10, 0)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Equal(suite.T(), 2, result.TotalResults)
+	assert.Equal(suite.T(), 2, result.Count)
+	assert.Equal(suite.T(), 1, result.StartIndex)
+	assert.Len(suite.T(), result.Themes, 2)
+}
+
+// Test GetThemeList - Store Count Error
+func (suite *ThemeServiceTestSuite) TestGetThemeList_CountError() {
+	suite.mockStore.On("GetThemeListCount").Return(0, errors.New("database error"))
+
+	result, err := suite.service.GetThemeList(context.Background(), 10, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// Test GetThemeList - Store Error
+func (suite *ThemeServiceTestSuite) TestGetThemeList_StoreError() {
+	suite.mockStore.On("GetThemeListCount").Return(2, nil)
+	suite.mockStore.On("GetThemeList", 10, 0).Return(nil, errors.New("database error"))
+
+	result, err := suite.service.GetThemeList(context.Background(), 10, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// Test GetThemeList - Invalid Pagination
+func (suite *ThemeServiceTestSuite) TestGetThemeList_InvalidLimit() {
+	result, err := suite.service.GetThemeList(context.Background(), -1, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1008", err.Code)
+}
+
+func (suite *ThemeServiceTestSuite) TestGetThemeList_InvalidOffset() {
+	result, err := suite.service.GetThemeList(context.Background(), 10, -1)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1009", err.Code)
+}
+
+// Test CreateTheme - Success
+func (suite *ThemeServiceTestSuite) TestCreateTheme_Success() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "new-theme",
+		DisplayName: "New Theme",
+		Description: "A new theme",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#ff0000"}}`),
+	}
+	storeReq := CreateThemeRequest{
+		Handle:      themeRequest.Handle,
+		DisplayName: themeRequest.DisplayName,
+		Description: themeRequest.Description,
+		Theme:       themeRequest.Theme,
+	}
+
+	suite.mockStore.On("IsThemeHandleConflict", "new-theme", "").Return(false, nil)
+	suite.mockStore.On("CreateTheme", mock.AnythingOfType("string"), storeReq).Return(nil)
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Equal(suite.T(), "new-theme", result.Handle)
+	assert.Equal(suite.T(), "New Theme", result.DisplayName)
+	assert.Equal(suite.T(), "A new theme", result.Description)
+	assert.NotEmpty(suite.T(), result.ID)
+}
+
+// Test CreateTheme - Missing Display Name
+func (suite *ThemeServiceTestSuite) TestCreateTheme_MissingDisplayName() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "my-theme",
+		DisplayName: "",
+		Description: "A theme without name",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#ff0000"}}`),
+	}
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1005", err.Code)
+}
+
+// Test CreateTheme - Missing Handle
+func (suite *ThemeServiceTestSuite) TestCreateTheme_MissingHandle() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "",
+		DisplayName: "My Theme",
+		Description: "A theme without handle",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#ff0000"}}`),
+	}
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1016", err.Code)
+}
+
+// Test CreateTheme - Duplicate Handle
+func (suite *ThemeServiceTestSuite) TestCreateTheme_DuplicateHandle() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "existing-theme",
+		DisplayName: "My Theme",
+		Description: "A theme with duplicate handle",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#ff0000"}}`),
+	}
+
+	suite.mockStore.On("IsThemeHandleConflict", "existing-theme", "").Return(true, nil)
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1015", err.Code)
+}
+
+// Test CreateTheme - Declarative mode enabled
+func (suite *ThemeServiceTestSuite) TestCreateTheme_DeclarativeModeEnabled() {
+	runtime := config.GetServerRuntime()
+	runtime.Config.Theme.Store = "declarative"
+
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "declarative-theme",
+		DisplayName: "Declarative Theme",
+		Description: "Should be blocked",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#ff0000"}}`),
+	}
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1014", err.Code)
+}
+
+// Test CreateTheme - Invalid Theme JSON
+func (suite *ThemeServiceTestSuite) TestCreateTheme_InvalidJSON() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "Invalid JSON theme",
+		Theme:       json.RawMessage(`{invalid json}`),
+	}
+
+	suite.mockStore.On("IsThemeHandleConflict", "my-theme", "").Return(false, nil)
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1007", err.Code)
+}
+
+// Test CreateTheme - Store Error
+func (suite *ThemeServiceTestSuite) TestCreateTheme_StoreError() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#ff0000"}}`),
+	}
+	storeReq := CreateThemeRequest{
+		Handle:      themeRequest.Handle,
+		DisplayName: themeRequest.DisplayName,
+		Description: themeRequest.Description,
+		Theme:       themeRequest.Theme,
+	}
+
+	suite.mockStore.On("IsThemeHandleConflict", "my-theme", "").Return(false, nil)
+	suite.mockStore.On("CreateTheme", mock.AnythingOfType("string"), storeReq).Return(errors.New("database error"))
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// Test GetTheme - Success
+func (suite *ThemeServiceTestSuite) TestGetTheme_Success() {
+	theme := Theme{
+		ID:          "theme-123",
+		DisplayName: "Test Theme",
+		Description: "A test theme",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#007bff"}}`),
+	}
+
+	suite.mockStore.On("GetTheme", "theme-123").Return(theme, nil)
+
+	result, err := suite.service.GetTheme(context.Background(), "theme-123")
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Equal(suite.T(), "theme-123", result.ID)
+	assert.Equal(suite.T(), "Test Theme", result.DisplayName)
+}
+
+// Test GetTheme - Invalid ID
+func (suite *ThemeServiceTestSuite) TestGetTheme_InvalidID() {
+	result, err := suite.service.GetTheme(context.Background(), "")
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1002", err.Code)
+}
+
+// Test GetTheme - Not Found
+func (suite *ThemeServiceTestSuite) TestGetTheme_NotFound() {
+	suite.mockStore.On("GetTheme", "non-existent").Return(Theme{}, errThemeNotFound)
+
+	result, err := suite.service.GetTheme(context.Background(), "non-existent")
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1003", err.Code)
+}
+
+// Test GetTheme - Store Error
+func (suite *ThemeServiceTestSuite) TestGetTheme_StoreError() {
+	suite.mockStore.On("GetTheme", "theme-123").Return(Theme{}, errors.New("database error"))
+
+	result, err := suite.service.GetTheme(context.Background(), "theme-123")
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// Test UpdateTheme - Success
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_Success() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "my-theme",
+		DisplayName: "Updated Theme",
+		Description: "An updated theme",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#00ff00"}}`),
+	}
+	existingTheme := Theme{
+		ID:     "theme-123",
+		Handle: "my-theme",
+	}
+
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("GetTheme", "theme-123").Return(existingTheme, nil)
+	suite.mockStore.On("UpdateTheme", "theme-123", updateRequest).Return(nil)
+
+	result, err := suite.service.UpdateTheme(context.Background(), "theme-123", updateRequest)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Equal(suite.T(), "theme-123", result.ID)
+	assert.Equal(suite.T(), "my-theme", result.Handle)
+	assert.Equal(suite.T(), "Updated Theme", result.DisplayName)
+}
+
+// Test UpdateTheme - Omitted Handle uses existing handle
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_OmittedHandle_UsesExisting() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "",
+		DisplayName: "Updated Theme",
+		Description: "An updated theme",
+		Theme:       json.RawMessage(`{"colors": {"primary": "#00ff00"}}`),
+	}
+	existingTheme := Theme{
+		ID:     "theme-123",
+		Handle: "existing-handle",
+	}
+
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("GetTheme", "theme-123").Return(existingTheme, nil)
+	suite.mockStore.On("UpdateTheme", "theme-123", updateRequest).Return(nil)
+
+	result, err := suite.service.UpdateTheme(context.Background(), "theme-123", updateRequest)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Equal(suite.T(), "existing-handle", result.Handle)
+}
+
+// Test UpdateTheme - Invalid ID
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_InvalidID() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {}}`),
+	}
+
+	result, err := suite.service.UpdateTheme(context.Background(), "", updateRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1002", err.Code)
+}
+
+// Test UpdateTheme - Missing Display Name
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_MissingDisplayName() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "my-theme",
+		DisplayName: "",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {}}`),
+	}
+
+	result, err := suite.service.UpdateTheme(context.Background(), "theme-123", updateRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1005", err.Code)
+}
+
+// Test UpdateTheme - Immutable Handle
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_ImmutableHandle() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "different-handle",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {}}`),
+	}
+	existingTheme := Theme{
+		ID:     "theme-123",
+		Handle: "my-theme",
+	}
+
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("GetTheme", "theme-123").Return(existingTheme, nil)
+
+	result, err := suite.service.UpdateTheme(context.Background(), "theme-123", updateRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1017", err.Code)
+}
+
+// Test UpdateTheme - Not Found
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_NotFound() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {}}`),
+	}
+
+	suite.mockStore.On("IsThemeDeclarative", "non-existent").Return(false)
+	suite.mockStore.On("GetTheme", "non-existent").Return(Theme{}, errThemeNotFound)
+
+	result, err := suite.service.UpdateTheme(context.Background(), "non-existent", updateRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1003", err.Code)
+}
+
+// Test UpdateTheme - Invalid JSON
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_InvalidJSON() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{invalid}`),
+	}
+	existingTheme := Theme{
+		ID:     "theme-123",
+		Handle: "my-theme",
+	}
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("GetTheme", "theme-123").Return(existingTheme, nil)
+	result, err := suite.service.UpdateTheme(context.Background(), "theme-123", updateRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1007", err.Code)
+}
+
+// Test DeleteTheme - Success
+func (suite *ThemeServiceTestSuite) TestDeleteTheme_Success() {
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+	suite.mockStore.On("DeleteTheme", "theme-123").Return(nil)
+
+	err := suite.service.DeleteTheme(context.Background(), "theme-123")
+
+	assert.Nil(suite.T(), err)
+}
+
+// Test DeleteTheme - Invalid ID
+func (suite *ThemeServiceTestSuite) TestDeleteTheme_InvalidID() {
+	err := suite.service.DeleteTheme(context.Background(), "")
+
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), "THM-1002", err.Code)
+}
+
+// Test DeleteTheme - Not Found (idempotent delete returns success)
+func (suite *ThemeServiceTestSuite) TestDeleteTheme_NotFound() {
+	suite.mockStore.On("IsThemeDeclarative", "non-existent").Return(false)
+	suite.mockStore.On("IsThemeExist", "non-existent").Return(false, nil)
+
+	err := suite.service.DeleteTheme(context.Background(), "non-existent")
+
+	assert.Nil(suite.T(), err)
+}
+
+// Test DeleteTheme - Store Error
+func (suite *ThemeServiceTestSuite) TestDeleteTheme_StoreError() {
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+	suite.mockStore.On("DeleteTheme", "theme-123").Return(errors.New("database error"))
+
+	err := suite.service.DeleteTheme(context.Background(), "theme-123")
+
+	assert.NotNil(suite.T(), err)
+}
+
+// Test IsThemeExist - Exists
+func (suite *ThemeServiceTestSuite) TestIsThemeExist_True() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+
+	exists, err := suite.service.IsThemeExist(context.Background(), "theme-123")
+
+	assert.Nil(suite.T(), err)
+	assert.True(suite.T(), exists)
+}
+
+// Test IsThemeExist - Not Exists
+func (suite *ThemeServiceTestSuite) TestIsThemeExist_False() {
+	suite.mockStore.On("IsThemeExist", "non-existent").Return(false, nil)
+
+	exists, err := suite.service.IsThemeExist(context.Background(), "non-existent")
+
+	assert.Nil(suite.T(), err)
+	assert.False(suite.T(), exists)
+}
+
+// Test IsThemeExist - Store Error
+func (suite *ThemeServiceTestSuite) TestIsThemeExist_StoreError() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(false, errors.New("database error"))
+
+	exists, err := suite.service.IsThemeExist(context.Background(), "theme-123")
+
+	assert.NotNil(suite.T(), err)
+	assert.False(suite.T(), exists)
+}
+
+// Test CreateTheme - Handle conflict check error
+func (suite *ThemeServiceTestSuite) TestCreateTheme_HandleConflictError() {
+	themeRequest := CreateThemeRequestWithID{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {}}`),
+	}
+
+	suite.mockStore.On("IsThemeHandleConflict", "my-theme", "").Return(false, errors.New("database error"))
+
+	result, err := suite.service.CreateTheme(context.Background(), themeRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// Test UpdateTheme - GetTheme store error
+func (suite *ThemeServiceTestSuite) TestUpdateTheme_GetThemeError() {
+	updateRequest := UpdateThemeRequest{
+		Handle:      "my-theme",
+		DisplayName: "Theme",
+		Description: "A theme",
+		Theme:       json.RawMessage(`{"colors": {}}`),
+	}
+
+	suite.mockStore.On("IsThemeDeclarative", "theme-123").Return(false)
+	suite.mockStore.On("GetTheme", "theme-123").Return(Theme{}, errors.New("database error"))
+
+	result, err := suite.service.UpdateTheme(context.Background(), "theme-123", updateRequest)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// --- GetThemeUsages tests ---
+
+// stubUsageRegistry is a minimal resourcedependency.Registry for tests.
+type stubUsageRegistry struct {
+	resp *resourcedependency.DependenciesResponse
+	err  error
+}
+
+func (s *stubUsageRegistry) RegisterProvider(resourcedependency.Provider) {}
+
+func (s *stubUsageRegistry) GetDependencies(
+	_ context.Context, _, _ string) (*resourcedependency.DependenciesResponse, error) {
+	return s.resp, s.err
+}
+
+func (s *stubUsageRegistry) CascadeDelete(_ context.Context, _, _ string) (int, error) {
+	return 0, nil
+}
+
+func (s *stubUsageRegistry) ValidateReferenceUpdate(
+	_ context.Context, _, _ string) *tidcommon.ServiceError {
+	return nil
+}
+
+// Test GetThemeUsages - Empty ID
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_EmptyID() {
+	result, err := suite.service.GetThemeUsages(context.Background(), "", 10, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorInvalidThemeID.Code, err.Code)
+}
+
+// Test GetThemeUsages - Theme not found
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_NotFound() {
+	suite.mockStore.On("IsThemeExist", "missing").Return(false, nil)
+
+	result, err := suite.service.GetThemeUsages(context.Background(), "missing", 10, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), ErrorThemeNotFound.Code, err.Code)
+}
+
+// Test GetThemeUsages - Store error on existence check
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_ExistenceCheckError() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(false, errors.New("database error"))
+
+	result, err := suite.service.GetThemeUsages(context.Background(), "theme-123", 10, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}
+
+// Test GetThemeUsages - usage registry not set returns unknown (nil totalResults)
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_RegistryNotSet() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+
+	result, err := suite.service.GetThemeUsages(context.Background(), "theme-123", 10, 0)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.Nil(suite.T(), result.TotalResults)
+	assert.Nil(suite.T(), result.Summary)
+	assert.Empty(suite.T(), result.Usages)
+}
+
+// Test GetThemeUsages - registry returns usages
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_WithUsages() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+	total := 2
+	suite.service.SetDependencyRegistry(&stubUsageRegistry{
+		resp: &resourcedependency.DependenciesResponse{
+			TotalResults: &total,
+			Count:        2,
+			Summary:      map[string]int{resourcedependency.ResourceTypeApplication: 2},
+			Usages: []resourcedependency.ResourceDependency{
+				{ResourceType: resourcedependency.ResourceTypeApplication, ID: "app-1",
+					DisplayName: "App One", BehaviorOnDelete: resourcedependency.BehaviorFallback},
+				{ResourceType: resourcedependency.ResourceTypeApplication, ID: "app-2",
+					DisplayName: "App Two", BehaviorOnDelete: resourcedependency.BehaviorFallback},
+			},
+		},
+	})
+
+	result, err := suite.service.GetThemeUsages(context.Background(), "theme-123", 10, 0)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.NotNil(suite.T(), result.TotalResults)
+	assert.Equal(suite.T(), 2, *result.TotalResults)
+	assert.Equal(suite.T(), 2, result.Summary[resourcedependency.ResourceTypeApplication])
+	assert.Len(suite.T(), result.Usages, 2)
+	assert.Equal(suite.T(), resourcedependency.ResourceTypeApplication, result.Usages[0].ResourceType)
+	assert.Equal(suite.T(), resourcedependency.BehaviorFallback, result.Usages[0].BehaviorOnDelete)
+	assert.Equal(suite.T(), "App One", result.Usages[0].DisplayName)
+}
+
+// Test GetThemeUsages - registry returns no usages
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_NoUsages() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+	total := 0
+	suite.service.SetDependencyRegistry(&stubUsageRegistry{
+		resp: &resourcedependency.DependenciesResponse{
+			TotalResults: &total, Usages: []resourcedependency.ResourceDependency{},
+		},
+	})
+
+	result, err := suite.service.GetThemeUsages(context.Background(), "theme-123", 10, 0)
+
+	assert.Nil(suite.T(), err)
+	assert.NotNil(suite.T(), result)
+	assert.NotNil(suite.T(), result.TotalResults)
+	assert.Equal(suite.T(), 0, *result.TotalResults)
+	assert.Empty(suite.T(), result.Usages)
+}
+
+// Test GetThemeUsages - registry returns error
+func (suite *ThemeServiceTestSuite) TestGetThemeUsages_RegistryError() {
+	suite.mockStore.On("IsThemeExist", "theme-123").Return(true, nil)
+	suite.service.SetDependencyRegistry(&stubUsageRegistry{err: errors.New("registry error")})
+
+	result, err := suite.service.GetThemeUsages(context.Background(), "theme-123", 10, 0)
+
+	assert.Nil(suite.T(), result)
+	assert.NotNil(suite.T(), err)
+}

@@ -1,0 +1,82 @@
+{
+  "requestTime": "{{$isoTimestamp}}",
+  "request": {
+    "individualId": "1774231323",
+    "pin": "111111",
+    "password": "SetuPass-Demo-Only-123",
+    "email": "postman.test@example.com",
+    "phone": "+919876543210",
+    "fullName": [
+      {
+        "language": "eng",
+        "value": "Postman Test User"
+      }
+    ],
+    "nickName": [
+      {
+        "language": "eng",
+        "value": "Postman Test User"
+      }
+    ],
+    "preferredUsername": [
+      {
+        "language": "eng",
+        "value": "Postman Test User"
+      }
+    ],
+    "givenName": [
+      {
+        "language": "eng",
+        "value": "Postman"
+      }
+    ],
+    "middleName": [
+      {
+        "language": "eng",
+        "value": "Test"
+      }
+    ],
+    "familyName": [
+      {
+        "language": "eng",
+        "value": "User"
+      }
+    ],
+    "gender": [
+      {
+        "language": "eng",
+        "value": "Female"
+      }
+    ],
+    "dateOfBirth": "1990/01/01",
+    "streetAddress": [
+      {
+        "language": "eng",
+        "value": "123 Test Street"
+      }
+    ],
+    "locality": [
+      {
+        "language": "eng",
+        "value": "Test City"
+      }
+    ],
+    "region": [
+      {
+        "language": "eng",
+        "value": "Test Region"
+      }
+    ],
+    "country": [
+      {
+        "language": "eng",
+        "value": "Test Country"
+      }
+    ],
+    "postalCode": "110001",
+    "preferredLang": "eng",
+    "locale": "en",
+    "zoneInfo": "Asia/Kolkata",
+    "encodedPhoto": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGM4YWQERAwQCgAjNgSxRnwWMwAAAABJRU5ErkJggg=="
+  }
+}

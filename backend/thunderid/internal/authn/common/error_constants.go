@@ -1,0 +1,172 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package common
+
+import (
+	"github.com/thunder-id/thunderid/internal/system/error/apierror"
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+)
+
+// API errors
+
+// APIErrorInvalidRequestFormat is returned when the request body is malformed.
+var APIErrorInvalidRequestFormat = apierror.ErrorResponse{
+	Code: "AUTHN-1000",
+	Message: tidcommon.I18nMessage{
+		Key:          "error.authncredservice.invalid_request_format",
+		DefaultValue: "Invalid request format",
+	},
+	Description: tidcommon.I18nMessage{
+		Key:          "error.authncredservice.invalid_request_format_description",
+		DefaultValue: "The request body is malformed or contains invalid data",
+	},
+}
+
+// Client errors for the service
+var (
+	// ErrorInvalidIDPID is the error returned when the provided IDP ID is invalid.
+	ErrorInvalidIDPID = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1001",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_idp_id",
+			DefaultValue: "Invalid identity provider ID",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_idp_id_description",
+			DefaultValue: "The provided identity provider ID is invalid or empty",
+		},
+	}
+	// ErrorClientErrorWhileRetrievingIDP is the error returned when there is a client error while retrieving the IDP.
+	ErrorClientErrorWhileRetrievingIDP = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1002",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.error_retrieving_idp",
+			DefaultValue: "Error retrieving identity provider",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.error_retrieving_idp_description",
+			DefaultValue: "An error occurred while retrieving the identity provider",
+		},
+	}
+	// ErrorInvalidIDPType is the error returned when the provided IDP type is invalid.
+	ErrorInvalidIDPType = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1003",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_idp_type",
+			DefaultValue: "Invalid identity provider type",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_idp_type_description",
+			DefaultValue: "The requested identity provider type is invalid",
+		},
+	}
+	// ErrorEmptySessionToken is the error returned when the provided session token is invalid.
+	ErrorEmptySessionToken = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1004",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.empty_session_token",
+			DefaultValue: "Empty session token",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.empty_session_token_description",
+			DefaultValue: "The provided session token is empty",
+		},
+	}
+	// ErrorEmptyAuthCode is the error returned when the provided authorization code is empty.
+	ErrorEmptyAuthCode = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1005",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.empty_auth_code",
+			DefaultValue: "Empty authorization code",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.empty_auth_code_description",
+			DefaultValue: "The provided authorization code is empty",
+		},
+	}
+	// ErrorInvalidSessionToken is the error returned when the provided session token is invalid.
+	ErrorInvalidSessionToken = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1006",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_session_token",
+			DefaultValue: "Invalid session token",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_session_token_description",
+			DefaultValue: "The provided session token is invalid or has expired",
+		},
+	}
+	// ErrorSubClaimNotFound is the error returned when the 'sub' claim is not found in the ID token.
+	ErrorSubClaimNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1007",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.sub_claim_not_found",
+			DefaultValue: "user subject not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.sub_claim_not_found_description",
+			DefaultValue: "The 'sub' claim is not found in the ID token claims",
+		},
+	}
+	// ErrorUserNotFound is the error when no user is found with the provided attributes.
+	ErrorUserNotFound = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1008",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.user_not_found",
+			DefaultValue: "User not found",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.user_not_found_description",
+			DefaultValue: "No user found with the provided attributes",
+		},
+	}
+	// ErrorInvalidAssertion is the error returned when the provided assertion token is invalid.
+	ErrorInvalidAssertion = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1009",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_assertion",
+			DefaultValue: "Invalid assertion",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.invalid_assertion_description",
+			DefaultValue: "The provided assertion token is invalid",
+		},
+	}
+	// ErrorAssertionSubjectMismatch is the error returned when the assertion subject doesn't match
+	// the authenticated user.
+	ErrorAssertionSubjectMismatch = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1010",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.assertion_subject_mismatch",
+			DefaultValue: "Assertion subject mismatch",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.assertion_subject_mismatch_description",
+			DefaultValue: "The subject in the assertion does not match the authenticated user",
+		},
+	}
+	// ErrorAmbiguousUser is the error when multiple users match the provided attributes.
+	ErrorAmbiguousUser = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "AUTHN-1011",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.authnservice.ambiguous_user",
+			DefaultValue: "Ambiguous user",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.authnservice.ambiguous_user_description",
+			DefaultValue: "Multiple users match the provided attributes",
+		},
+	}
+)

@@ -1,0 +1,258 @@
+// Copyright 2025-2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"encoding/json"
+	"errors"
+
+	"github.com/thunder-id/thunderid/internal/entityprovider"
+	"github.com/thunder-id/thunderid/internal/flow/common"
+	"github.com/thunder-id/thunderid/internal/flow/core"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/utils"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+const (
+	authzLoggerComponentName = "AuthorizationExecutor"
+	authorizedPermissionsKey = "authorized_permissions"
+	requestedPermissionsKey  = "requested_permissions"
+)
+
+// authorizationExecutor implements the ExecutorInterface for performing authorization checks
+// during flow execution. It enriches the flow context with authorized permissions.
+type authorizationExecutor struct {
+	providers.Executor
+	authzService    providers.AuthorizationProvider
+	entityProvider  entityprovider.EntityProviderInterface
+	authnProvider   providers.AuthnProviderManager
+	resourceService providers.ResourceServerProvider
+	logger          *log.Logger
+}
+
+var _ providers.Executor = (*authorizationExecutor)(nil)
+
+// newAuthorizationExecutor creates a new instance of AuthorizationExecutor.
+func newAuthorizationExecutor(
+	flowFactory core.FlowFactoryInterface,
+	authZService providers.AuthorizationProvider,
+	entityProvider entityprovider.EntityProviderInterface,
+	authnProvider providers.AuthnProviderManager,
+	resourceService providers.ResourceServerProvider,
+) *authorizationExecutor {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, authzLoggerComponentName),
+		log.String(log.LoggerKeyExecutorName, ExecutorNameAuthorization))
+
+	base := flowFactory.CreateExecutor(ExecutorNameAuthorization, providers.ExecutorTypeUtility,
+		[]providers.Input{}, []providers.Input{}, &providers.ExecutorMeta{})
+
+	return &authorizationExecutor{
+		Executor:        base,
+		authzService:    authZService,
+		entityProvider:  entityProvider,
+		authnProvider:   authnProvider,
+		resourceService: resourceService,
+		logger:          logger,
+	}
+}
+
+// Execute executes the authorization logic by determining required permissions based on context,
+// calling the authorization service, and storing authorized permissions in runtime data.
+func (a *authorizationExecutor) Execute(ctx *providers.NodeContext) (*providers.ExecutorResponse, error) {
+	logger := a.logger.With(log.String(log.LoggerKeyExecutionID, ctx.ExecutionID))
+	logger.Debug(ctx.Context, "Executing authorization executor")
+
+	execResp := &providers.ExecutorResponse{
+		RuntimeData: make(map[string]string),
+		AuthUser:    ctx.AuthUser,
+	}
+
+	if !execResp.AuthUser.IsAuthenticated() && ctx.FlowType == providers.FlowTypeRegistration {
+		logger.Debug(ctx.Context,
+			"Sending executor complete response for unauthenticated user in registration flow")
+		execResp.Status = providers.ExecComplete
+		return execResp, nil
+	}
+
+	if !execResp.AuthUser.IsAuthenticated() {
+		execResp.Status = providers.ExecFailure
+		execResp.Error = &ErrUserNotAuthenticated
+		return execResp, nil
+	}
+
+	authUser, entityRef, svcErr := a.authnProvider.GetEntityReference(ctx.Context, execResp.AuthUser)
+	execResp.AuthUser = authUser
+	if svcErr != nil {
+		execResp.Status = providers.ExecFailure
+		execResp.Error = &ErrFailedToIdentifyUser
+		return execResp, nil
+	}
+
+	// Determine required permissions
+	requestedPerms := extractRequestedPermissions(ctx)
+
+	if len(requestedPerms) == 0 {
+		logger.Debug(ctx.Context, "No permissions to check, returning empty permissions")
+		execResp.Status = providers.ExecComplete
+		return execResp, nil
+	}
+
+	// Resolve the single resource server the permission scopes are evaluated against: the OAuth layer
+	// seeds it in runtime data; a direct /flow/execute request (which does not go through the
+	// authorization endpoint) may supply it as an input; otherwise fall back to the configured default
+	// resource server. Permission evaluation must be scoped to a resource server, so when none can be
+	// resolved the requested permission scopes are dropped rather than evaluated unscoped (which could
+	// authorize a permission the user only holds on a different resource server).
+	resourceServerID := a.resolveResourceServerID(ctx)
+	if resourceServerID == "" {
+		logger.Debug(ctx.Context,
+			"No resource server bound to the request; dropping requested permission scopes",
+			log.Int("permissionCount", len(requestedPerms)))
+		setAuthorizedPermissions(execResp, []string{})
+		execResp.Status = providers.ExecComplete
+		return execResp, nil
+	}
+
+	logger.Debug(ctx.Context, "Determined required permissions", log.Int("count", len(requestedPerms)))
+
+	// Extract user ID and group IDs
+	userID := entityRef.EntityID
+	groupIDs, err := a.extractGroupIDs(ctx, userID)
+	if err != nil {
+		return nil, errors.Join(errors.New("Failed to extract group IDs"), err)
+	}
+
+	logger.Debug(ctx.Context, "Calling authorization service",
+		log.MaskedString(log.LoggerKeyUserID, userID),
+		log.Int("groupCount", len(groupIDs)),
+		log.Int("permissionCount", len(requestedPerms)))
+
+	authzResp, svcErr := a.authzService.EvaluateAccessBatch(ctx.Context,
+		a.buildAccessEvaluationsRequest(userID, groupIDs, requestedPerms, resourceServerID))
+	if svcErr != nil {
+		logger.Error(ctx.Context, "Authorization service call failed",
+			log.String("error", svcErr.Error.DefaultValue))
+		execResp.Status = providers.ExecFailure
+		execResp.Error = &ErrAuthorizationFailed
+		return execResp, nil
+	}
+
+	authorizedPermissions := a.filterAuthorizedPermissions(requestedPerms, authzResp.Evaluations)
+	setAuthorizedPermissions(execResp, authorizedPermissions)
+	logger.Debug(ctx.Context, "Authorization completed successfully",
+		log.Int("authorizedCount", len(authorizedPermissions)))
+
+	execResp.Status = providers.ExecComplete
+	return execResp, nil
+}
+
+// resolveResourceServerID determines the internal ID of the single resource server that permission
+// scopes are evaluated against. The binding is communicated as a resource server identifier: the OAuth
+// layer seeds it in runtime data, and a direct /flow/execute request (which does not go through the
+// authorization endpoint) may supply it as an input. The identifier is resolved to its internal ID
+// through the provider; an empty identifier asks a default-aware provider to resolve the deployment's
+// configured default resource server. Returns "" when none can be resolved (unknown identifier, no
+// default configured, or no resource provider available, for example the embedded engine).
+func (a *authorizationExecutor) resolveResourceServerID(ctx *providers.NodeContext) string {
+	identifier := ctx.RuntimeData[common.RuntimeKeyResourceServerIdentifier]
+	if identifier == "" {
+		identifier = ctx.UserInputs[common.RuntimeKeyResourceServerIdentifier]
+	}
+	if a.resourceService == nil {
+		a.logger.Debug(ctx.Context,
+			"No resource server service available; dropping requested permission scopes")
+		return ""
+	}
+	rs, svcErr := a.resourceService.GetResourceServerByIdentifier(ctx.Context, identifier)
+	if svcErr != nil {
+		a.logger.Debug(ctx.Context,
+			"Resource server did not resolve; dropping requested permission scopes",
+			log.String("identifier", identifier))
+		return ""
+	}
+	return rs.ID
+}
+
+// extractRequestedPermissions extracts requested permissions from the context.
+func extractRequestedPermissions(ctx *providers.NodeContext) []string {
+	requestedPermissions := ctx.RuntimeData[requestedPermissionsKey]
+	if requestedPermissions != "" {
+		return utils.ParseStringArray(requestedPermissions, " ")
+	}
+	requestedPermissions = ctx.UserInputs[requestedPermissionsKey]
+	return utils.ParseStringArray(requestedPermissions, " ")
+}
+
+// setAuthorizedPermissions sets the authorized permissions in the executor response's runtime data.
+func setAuthorizedPermissions(execResp *providers.ExecutorResponse, authorizedPermissions []string) {
+	execResp.RuntimeData[authorizedPermissionsKey] = utils.StringifyStringArray(authorizedPermissions, " ")
+}
+
+// buildAccessEvaluationsRequest builds the authorization service request for the requested permissions.
+func (a *authorizationExecutor) buildAccessEvaluationsRequest(
+	entityID string,
+	groupIDs []string,
+	requestedPermissions []string,
+	resourceServerID string,
+) providers.AccessEvaluationsRequest {
+	evaluations := make([]providers.AccessEvaluationRequest, 0, len(requestedPermissions))
+	for _, permission := range requestedPermissions {
+		evaluations = append(evaluations, providers.AccessEvaluationRequest{
+			Subject: providers.Subject{
+				ID:       entityID,
+				GroupIDs: groupIDs,
+			},
+			ResourceServer: providers.AccessEvaluationResourceServer{ID: resourceServerID},
+			Permission:     providers.Permission{Name: permission},
+		})
+	}
+	return providers.AccessEvaluationsRequest{Evaluations: evaluations}
+}
+
+// filterAuthorizedPermissions returns the requested permissions that were allowed by the authorization service.
+func (a *authorizationExecutor) filterAuthorizedPermissions(
+	requestedPermissions []string,
+	evaluations []providers.AccessEvaluationResponse,
+) []string {
+	authorizedPermissions := make([]string, 0, len(evaluations))
+	for i, evaluation := range evaluations {
+		if evaluation.Decision && i < len(requestedPermissions) {
+			authorizedPermissions = append(authorizedPermissions, requestedPermissions[i])
+		}
+	}
+	return authorizedPermissions
+}
+
+// extractGroupIDs extracts group IDs from the authenticated user's attributes or runtime data.
+// If neither provides group information, it fetches them using the user service.
+func (a *authorizationExecutor) extractGroupIDs(ctx *providers.NodeContext, userID string) ([]string, error) {
+	// Try to get groups from runtime data (JSON array string)
+	if groupsJSON, ok := ctx.RuntimeData[userAttributeGroups]; ok && groupsJSON != "" {
+		var groups []string
+		if err := json.Unmarshal([]byte(groupsJSON), &groups); err == nil {
+			return groups, nil
+		}
+	}
+
+	// If no groups found in context, fetch transitive groups from entity provider
+	if a.entityProvider != nil && userID != "" {
+		a.logger.Debug(ctx.Context,
+			"Groups not found in context, fetching transitive groups from entity provider",
+			log.MaskedString(log.LoggerKeyUserID, userID))
+
+		groups, err := a.entityProvider.GetTransitiveEntityGroups(userID)
+		if err != nil {
+			return nil, err
+		}
+		groupIDs := make([]string, 0, len(groups))
+		for _, g := range groups {
+			groupIDs = append(groupIDs, g.ID)
+		}
+		return groupIDs, nil
+	}
+
+	// No groups found
+	return []string{}, nil
+}

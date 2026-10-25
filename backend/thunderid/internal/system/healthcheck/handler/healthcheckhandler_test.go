@@ -1,0 +1,129 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/thunder-id/thunderid/internal/system/constants"
+	"github.com/thunder-id/thunderid/internal/system/healthcheck/model"
+	"github.com/thunder-id/thunderid/tests/mocks/healthcheck/servicemock"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+)
+
+type HealthCheckHandlerTestSuite struct {
+	suite.Suite
+	handler     *HealthCheckHandler
+	mockService *servicemock.HealthCheckServiceInterfaceMock
+}
+
+func TestHealthCheckHandlerSuite(t *testing.T) {
+	suite.Run(t, new(HealthCheckHandlerTestSuite))
+}
+
+func (suite *HealthCheckHandlerTestSuite) BeforeTest(suiteName, testName string) {
+	suite.mockService = &servicemock.HealthCheckServiceInterfaceMock{}
+	suite.handler = NewHealthCheckHandler(suite.mockService)
+}
+
+func (suite *HealthCheckHandlerTestSuite) TestHandleLivenessRequest() {
+	// Create request and recorder
+	req := httptest.NewRequest("GET", "/health/liveness", nil)
+	rec := httptest.NewRecorder()
+
+	// Call handler method
+	suite.handler.HandleLivenessRequest(rec, req)
+
+	// Assert response
+	assert.Equal(suite.T(), http.StatusOK, rec.Code)
+}
+
+func (suite *HealthCheckHandlerTestSuite) TestHandleReadinessRequest_AllUp() {
+	// Create request and recorder
+	req := httptest.NewRequest("GET", "/health/readiness", nil)
+	rec := httptest.NewRecorder()
+
+	// Setup mock to return status UP
+	serviceStatus := []model.ServiceStatus{
+		{
+			ServiceName: "ConfigDB",
+			Status:      model.StatusUp,
+		},
+		{
+			ServiceName: "RuntimeTransientDB",
+			Status:      model.StatusUp,
+		},
+		{
+			ServiceName: "EntityDB",
+			Status:      model.StatusUp,
+		},
+	}
+	serverStatus := model.ServerStatus{
+		Status:        model.StatusUp,
+		ServiceStatus: serviceStatus,
+	}
+	suite.mockService.On("CheckReadiness", mock.Anything).Return(serverStatus)
+
+	// Call handler method
+	suite.handler.HandleReadinessRequest(rec, req)
+
+	// Assert response
+	assert.Equal(suite.T(), http.StatusOK, rec.Code)
+	assert.Equal(suite.T(), constants.ContentTypeJSON, rec.Header().Get(constants.ContentTypeHeaderName))
+
+	var response model.ServerStatus
+	err := json.NewDecoder(rec.Body).Decode(&response)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), model.StatusUp, response.Status)
+	assert.Len(suite.T(), response.ServiceStatus, 3)
+
+	suite.mockService.AssertExpectations(suite.T())
+}
+
+func (suite *HealthCheckHandlerTestSuite) TestHandleReadinessRequest_Down() {
+	// Create request and recorder
+	req := httptest.NewRequest("GET", "/health/readiness", nil)
+	rec := httptest.NewRecorder()
+
+	// Setup mock to return status DOWN
+	serviceStatus := []model.ServiceStatus{
+		{
+			ServiceName: "ConfigDB",
+			Status:      model.StatusUp,
+		},
+		{
+			ServiceName: "RuntimeTransientDB",
+			Status:      model.StatusDown,
+		},
+		{
+			ServiceName: "EntityDB",
+			Status:      model.StatusDown,
+		},
+	}
+	serverStatus := model.ServerStatus{
+		Status:        model.StatusDown,
+		ServiceStatus: serviceStatus,
+	}
+	suite.mockService.On("CheckReadiness", mock.Anything).Return(serverStatus)
+
+	// Call handler method
+	suite.handler.HandleReadinessRequest(rec, req)
+
+	// Assert response
+	assert.Equal(suite.T(), http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(suite.T(), constants.ContentTypeJSON, rec.Header().Get(constants.ContentTypeHeaderName))
+
+	var response model.ServerStatus
+	err := json.NewDecoder(rec.Body).Decode(&response)
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), model.StatusDown, response.Status)
+
+	suite.mockService.AssertExpectations(suite.T())
+}

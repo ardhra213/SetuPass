@@ -1,0 +1,204 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package core
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	"github.com/thunder-id/thunderid/internal/flow/common"
+	sysutils "github.com/thunder-id/thunderid/internal/system/utils"
+)
+
+// FlowFactoryInterface defines the interface for creating flow graph components.
+type FlowFactoryInterface interface {
+	CreateNode(id, _type string, properties map[string]interface{}, isStartNode, isFinalNode bool) (
+		NodeInterface, error)
+	CreateGraph(id string, _type providers.FlowType, version int) GraphInterface
+	CreateExecutor(name string, executorType providers.ExecutorType,
+		defaultInputs, prerequisites []providers.Input, meta *providers.ExecutorMeta) providers.Executor
+	CreateInterceptor(name string, isDefault bool, priority int) InterceptorInterface
+	CreateInterceptorUnit(name string, mode providers.InterceptorMode,
+		scope providers.InterceptorScope, applyTo []string,
+		properties map[string]interface{}) InterceptorUnitInterface
+	CloneNode(source NodeInterface) (NodeInterface, error)
+	CloneNodes(nodes map[string]NodeInterface) (map[string]NodeInterface, error)
+}
+
+// flowFactory is the concrete implementation of FlowFactoryInterface
+type flowFactory struct{}
+
+func newFlowFactory() FlowFactoryInterface {
+	return &flowFactory{}
+}
+
+// CreateNode creates a new node based on the provided type and properties
+func (f *flowFactory) CreateNode(id, _type string, properties map[string]interface{},
+	isStartNode, isFinalNode bool) (NodeInterface, error) {
+	var nodeType common.NodeType
+	if _type == "" {
+		return nil, errors.New("node type cannot be empty")
+	} else {
+		nodeType = common.NodeType(_type)
+	}
+	if properties == nil {
+		properties = make(map[string]interface{})
+	}
+
+	switch nodeType {
+	case common.NodeTypeTaskExecution:
+		return newTaskExecutionNode(id, properties, isStartNode, isFinalNode), nil
+	case common.NodeTypePrompt:
+		return newPromptNode(id, properties, isStartNode, isFinalNode), nil
+	case common.NodeTypeStart, common.NodeTypeEnd:
+		return newRepresentationNode(id, nodeType, properties, isStartNode, isFinalNode), nil
+	case common.NodeTypeCall:
+		return newCallNode(id, properties, isStartNode, isFinalNode), nil
+	default:
+		return nil, errors.New("unsupported node type: " + _type)
+	}
+}
+
+// CreateGraph creates a new graph with the given ID and type
+func (f *flowFactory) CreateGraph(id string, _type providers.FlowType, version int) GraphInterface {
+	if id == "" {
+		id = sysutils.GenerateUUID()
+	}
+	if _type == "" {
+		_type = providers.FlowTypeAuthentication
+	}
+	if version <= 0 {
+		version = 1
+	}
+
+	return &graph{
+		id:      id,
+		_type:   _type,
+		version: version,
+		nodes:   make(map[string]NodeInterface),
+		edges:   make(map[string][]string),
+	}
+}
+
+// CreateExecutor creates a new executor with the given properties
+func (f *flowFactory) CreateExecutor(name string, executorType providers.ExecutorType,
+	defaultInputs, prerequisites []providers.Input, meta *providers.ExecutorMeta) providers.Executor {
+	return newExecutor(name, executorType, defaultInputs, prerequisites, meta)
+}
+
+// CreateInterceptor creates a new interceptor with the given properties
+func (f *flowFactory) CreateInterceptor(name string, isDefault bool, priority int) InterceptorInterface {
+	return newInterceptor(name, isDefault, priority)
+}
+
+// CreateInterceptorUnit creates a new interceptor execution unit from flow-level configuration.
+func (f *flowFactory) CreateInterceptorUnit(name string, mode providers.InterceptorMode,
+	scope providers.InterceptorScope, applyTo []string,
+	properties map[string]interface{}) InterceptorUnitInterface {
+	return newInterceptorUnit(name, mode, scope, applyTo, properties)
+}
+
+// CloneNode creates a deep copy of a given node
+func (f *flowFactory) CloneNode(source NodeInterface) (NodeInterface, error) {
+	if source == nil {
+		return nil, errors.New("source node cannot be nil")
+	}
+
+	// Deep copy properties
+	var propertiesCopy map[string]interface{}
+	if source.GetProperties() != nil {
+		propertiesCopy = sysutils.DeepCopyMap(source.GetProperties())
+	} else {
+		propertiesCopy = make(map[string]interface{})
+	}
+
+	// Create new node
+	nodeCopy, err := f.CreateNode(
+		source.GetID(),
+		string(source.GetType()),
+		propertiesCopy,
+		source.IsStartNode(),
+		source.IsFinalNode(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone node: %w", err)
+	}
+
+	// Copy node connections and metadata
+	nodeCopy.SetNextNodeList(append([]string{}, source.GetNextNodeList()...))
+	nodeCopy.SetPreviousNodeList(append([]string{}, source.GetPreviousNodeList()...))
+
+	// Copy condition if present
+	if sourceCondition := source.GetCondition(); sourceCondition != nil {
+		nodeCopy.SetCondition(&NodeCondition{
+			Key:   sourceCondition.Key,
+			Value: sourceCondition.Value,
+		})
+	}
+
+	// Copy onSuccess for representation nodes (START/END)
+	if repSource, ok := source.(RepresentationNodeInterface); ok {
+		if repCopy, ok := nodeCopy.(RepresentationNodeInterface); ok {
+			repCopy.SetOnSuccess(repSource.GetOnSuccess())
+		}
+	}
+
+	// Copy executor name, inputs, onSuccess, and onFailure if the node is executor-backed
+	if executableSource, ok := source.(ExecutorBackedNodeInterface); ok {
+		if executableCopy, ok := nodeCopy.(ExecutorBackedNodeInterface); ok {
+			executableCopy.SetExecutorName(executableSource.GetExecutorName())
+			executableCopy.SetInputs(append([]providers.Input{}, executableSource.GetInputs()...))
+			executableCopy.SetOnSuccess(executableSource.GetOnSuccess())
+			executableCopy.SetOnFailure(executableSource.GetOnFailure())
+			executableCopy.SetOnIncomplete(executableSource.GetOnIncomplete())
+		} else {
+			return nil, errors.New("mismatch in node types during cloning. copy is not executor-backed")
+		}
+	}
+
+	// Copy prompts and meta if the node is a prompt node
+	if promptSource, ok := source.(PromptNodeInterface); ok {
+		if promptCopy, ok := nodeCopy.(PromptNodeInterface); ok {
+			promptCopy.SetPrompts(append([]common.Prompt{}, promptSource.GetPrompts()...))
+			promptCopy.SetMeta(sysutils.DeepCopyInterface(promptSource.GetMeta()))
+			promptCopy.SetNextNode(promptSource.GetNextNode())
+			promptCopy.SetMessage(promptSource.GetMessage())
+		} else {
+			return nil, errors.New("mismatch in node types during cloning. copy is not a prompt node")
+		}
+	}
+
+	// Copy referencedFlow, onSuccess, and onFailure if the node is a call node
+	if callSource, ok := source.(CallNodeInterface); ok {
+		if callCopy, ok := nodeCopy.(CallNodeInterface); ok {
+			callCopy.SetReferencedFlow(callSource.GetReferencedFlow())
+			callCopy.SetOnSuccess(callSource.GetOnSuccess())
+			callCopy.SetOnFailure(callSource.GetOnFailure())
+		} else {
+			return nil, errors.New("mismatch in node types during cloning. copy is not a call node")
+		}
+	}
+
+	return nodeCopy, nil
+}
+
+// CloneNodes creates deep copies of a map of nodes
+func (f *flowFactory) CloneNodes(nodes map[string]NodeInterface) (map[string]NodeInterface, error) {
+	if nodes == nil {
+		return nil, nil
+	}
+
+	clonedNodes := make(map[string]NodeInterface, len(nodes))
+	for id, node := range nodes {
+		clonedNode, err := f.CloneNode(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to clone node %s: %w", id, err)
+		}
+		clonedNodes[id] = clonedNode
+	}
+
+	return clonedNodes, nil
+}

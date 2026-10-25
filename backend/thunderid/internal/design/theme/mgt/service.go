@@ -1,0 +1,381 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Package thememgt provides theme management functionality.
+package thememgt
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	serverconst "github.com/thunder-id/thunderid/internal/system/constants"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+	"github.com/thunder-id/thunderid/internal/system/utils"
+)
+
+const loggerComponentName = "ThemeMgtService"
+
+// ThemeMgtServiceInterface defines the interface for the theme management service.
+type ThemeMgtServiceInterface interface {
+	GetThemeList(ctx context.Context, limit, offset int) (*ThemeList, *tidcommon.ServiceError)
+	CreateTheme(ctx context.Context, theme CreateThemeRequestWithID) (*Theme, *tidcommon.ServiceError)
+	GetTheme(ctx context.Context, id string) (*Theme, *tidcommon.ServiceError)
+	UpdateTheme(ctx context.Context, id string, theme UpdateThemeRequest) (*Theme, *tidcommon.ServiceError)
+	DeleteTheme(ctx context.Context, id string) *tidcommon.ServiceError
+	IsThemeExist(ctx context.Context, id string) (bool, *tidcommon.ServiceError)
+	SetDependencyRegistry(r resourcedependency.Registry)
+	GetThemeUsages(ctx context.Context, id string, limit, offset int) (
+		*resourcedependency.DependenciesResponse, *tidcommon.ServiceError)
+}
+
+// themeMgtService is the default implementation of the ThemeMgtServiceInterface.
+type themeMgtService struct {
+	themeMgtStore      themeMgtStoreInterface
+	dependencyRegistry resourcedependency.Registry
+	logger             *log.Logger
+}
+
+// newThemeMgtService creates a new instance of ThemeMgtService with injected dependencies.
+func newThemeMgtService(themeMgtStore themeMgtStoreInterface) ThemeMgtServiceInterface {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
+	return &themeMgtService{
+		themeMgtStore: themeMgtStore,
+		logger:        logger,
+	}
+}
+
+// GetThemeList retrieves a list of theme configurations.
+func (ts *themeMgtService) GetThemeList(
+	ctx context.Context, limit, offset int) (*ThemeList, *tidcommon.ServiceError) {
+	if err := validatePaginationParams(limit, offset); err != nil {
+		return nil, err
+	}
+
+	totalCount, err := ts.themeMgtStore.GetThemeListCount()
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to get theme count", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	themes, err := ts.themeMgtStore.GetThemeList(limit, offset)
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to list themes", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	response := &ThemeList{
+		TotalResults: totalCount,
+		Themes:       themes,
+		StartIndex:   offset + 1,
+		Count:        len(themes),
+		Links:        buildPaginationLinks(limit, offset, totalCount),
+	}
+
+	return response, nil
+}
+
+// CreateTheme creates a new theme configuration.
+func (ts *themeMgtService) CreateTheme(
+	ctx context.Context, theme CreateThemeRequestWithID) (*Theme, *tidcommon.ServiceError) {
+	ts.logger.Debug(ctx, "Creating theme configuration")
+
+	if theme.DisplayName == "" {
+		return nil, &ErrorMissingDisplayName
+	}
+
+	if theme.Handle == "" {
+		return nil, &ErrorMissingThemeHandle
+	}
+
+	// Check if store is in pure declarative mode
+	if isDeclarativeModeEnabled() {
+		return nil, &ErrorCannotModifyDeclarativeResource
+	}
+
+	conflict, err := ts.themeMgtStore.IsThemeHandleConflict(theme.Handle, "")
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to check theme handle conflict", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+	if conflict {
+		return nil, &ErrorDuplicateThemeHandle
+	}
+
+	if err := ts.validateThemePreferences(ctx, theme.Theme); err != nil {
+		return nil, err
+	}
+
+	id := theme.ID
+	if id == "" {
+		var err error
+		id, err = utils.GenerateUUIDv7()
+		if err != nil {
+			ts.logger.Error(ctx, "Failed to generate UUID", log.Error(err))
+			return nil, &tidcommon.InternalServerError
+		}
+	}
+
+	storeReq := CreateThemeRequest{
+		Handle:      theme.Handle,
+		DisplayName: theme.DisplayName,
+		Description: theme.Description,
+		Theme:       theme.Theme,
+	}
+
+	if err := ts.themeMgtStore.CreateTheme(id, storeReq); err != nil {
+		ts.logger.Error(ctx, "Failed to create theme", log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	createdTheme := &Theme{
+		ID:          id,
+		Handle:      theme.Handle,
+		DisplayName: theme.DisplayName,
+		Description: theme.Description,
+		Theme:       theme.Theme,
+	}
+
+	ts.logger.Debug(ctx, "Successfully created theme", log.String("id", id))
+	return createdTheme, nil
+}
+
+// GetTheme retrieves a specific theme configuration by its id.
+func (ts *themeMgtService) GetTheme(ctx context.Context, id string) (*Theme, *tidcommon.ServiceError) {
+	ts.logger.Debug(ctx, "Retrieving theme", log.String("id", id))
+
+	if id == "" {
+		return nil, &ErrorInvalidThemeID
+	}
+
+	theme, err := ts.themeMgtStore.GetTheme(id)
+	if err != nil {
+		if errors.Is(err, errThemeNotFound) {
+			ts.logger.Debug(ctx, "Theme not found", log.String("id", id))
+			return nil, &ErrorThemeNotFound
+		}
+		ts.logger.Error(ctx, "Failed to retrieve theme", log.String("id", id), log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	ts.logger.Debug(ctx, "Successfully retrieved theme", log.String("id", theme.ID))
+	return &theme, nil
+}
+
+// UpdateTheme updates an existing theme configuration.
+func (ts *themeMgtService) UpdateTheme(
+	ctx context.Context, id string, theme UpdateThemeRequest) (*Theme, *tidcommon.ServiceError) {
+	ts.logger.Debug(ctx, "Updating theme", log.String("id", id))
+
+	if id == "" {
+		return nil, &ErrorInvalidThemeID
+	}
+
+	if theme.DisplayName == "" {
+		return nil, &ErrorMissingDisplayName
+	}
+
+	// Check if the theme is declarative (read-only)
+	if ts.themeMgtStore.IsThemeDeclarative(id) {
+		return nil, &ErrorCannotModifyDeclarativeResource
+	}
+
+	// Fetch existing theme to enforce handle immutability
+	existingTheme, err := ts.themeMgtStore.GetTheme(id)
+	if err != nil {
+		if errors.Is(err, errThemeNotFound) {
+			return nil, &ErrorThemeNotFound
+		}
+		ts.logger.Error(ctx, "Failed to retrieve theme", log.String("id", id), log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	// Handle is immutable; reject if a different value is provided
+	if theme.Handle != "" && theme.Handle != existingTheme.Handle {
+		return nil, &ErrorThemeHandleImmutable
+	}
+
+	if err := ts.validateThemePreferences(ctx, theme.Theme); err != nil {
+		return nil, err
+	}
+
+	if err := ts.themeMgtStore.UpdateTheme(id, theme); err != nil {
+		ts.logger.Error(ctx, "Failed to update theme", log.String("id", id), log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	updatedTheme := &Theme{
+		ID:          id,
+		Handle:      existingTheme.Handle,
+		DisplayName: theme.DisplayName,
+		Description: theme.Description,
+		Theme:       theme.Theme,
+	}
+
+	ts.logger.Debug(ctx, "Successfully updated theme", log.String("id", id))
+	return updatedTheme, nil
+}
+
+// DeleteTheme deletes a theme configuration.
+func (ts *themeMgtService) DeleteTheme(ctx context.Context, id string) *tidcommon.ServiceError {
+	ts.logger.Debug(ctx, "Deleting theme", log.String("id", id))
+
+	if id == "" {
+		return &ErrorInvalidThemeID
+	}
+
+	// Check if the theme is declarative (read-only)
+	if ts.themeMgtStore.IsThemeDeclarative(id) {
+		return &ErrorCannotModifyDeclarativeResource
+	}
+
+	// Check if theme exists. Return success for non-existing themes (idempotent delete).
+	exists, err := ts.themeMgtStore.IsThemeExist(id)
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to check theme existence", log.String("id", id), log.Error(err))
+		return &tidcommon.InternalServerError
+	}
+
+	if !exists {
+		ts.logger.Debug(ctx, "Theme not found for deletion, returning success", log.String("id", id))
+		return nil
+	}
+
+	// A theme can be deleted even while applications reference it: those applications keep their
+	// reference and fall back to the system default theme at read time (see the design resolve
+	// service). References are surfaced informationally through GetThemeUsages.
+	if err := ts.themeMgtStore.DeleteTheme(id); err != nil {
+		ts.logger.Error(ctx, "Failed to delete theme", log.String("id", id), log.Error(err))
+		return &tidcommon.InternalServerError
+	}
+
+	ts.logger.Debug(ctx, "Successfully deleted theme", log.String("id", id))
+	return nil
+}
+
+// IsThemeExist checks if a theme exists.
+func (ts *themeMgtService) IsThemeExist(ctx context.Context, id string) (bool, *tidcommon.ServiceError) {
+	if id == "" {
+		return false, &ErrorInvalidThemeID
+	}
+
+	exists, err := ts.themeMgtStore.IsThemeExist(id)
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to check theme existence", log.String("id", id), log.Error(err))
+		return false, &tidcommon.InternalServerError
+	}
+
+	return exists, nil
+}
+
+// SetDependencyRegistry injects the dependency registry. Called by servicemanager after the
+// provider services are initialized to avoid a cyclic import.
+func (ts *themeMgtService) SetDependencyRegistry(r resourcedependency.Registry) {
+	ts.dependencyRegistry = r
+}
+
+// GetThemeUsages returns the resources that reference this theme.
+func (ts *themeMgtService) GetThemeUsages(
+	ctx context.Context, id string, limit, offset int,
+) (*resourcedependency.DependenciesResponse, *tidcommon.ServiceError) {
+	if id == "" {
+		return nil, &ErrorInvalidThemeID
+	}
+
+	if err := validatePaginationParams(limit, offset); err != nil {
+		return nil, err
+	}
+
+	exists, err := ts.themeMgtStore.IsThemeExist(id)
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to check theme existence", log.String("id", id), log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+	if !exists {
+		return nil, &ErrorThemeNotFound
+	}
+
+	if ts.dependencyRegistry == nil {
+		ts.logger.Warn(ctx, "Dependency registry not set; returning unknown dependencies", log.String("id", id))
+		return &resourcedependency.DependenciesResponse{
+			TotalResults: nil,
+			Count:        0,
+			Summary:      nil,
+			Usages:       []resourcedependency.ResourceDependency{},
+		}, nil
+	}
+
+	result, err := ts.dependencyRegistry.GetDependencies(ctx, resourcedependency.ResourceTypeTheme, id)
+	if err != nil {
+		ts.logger.Error(ctx, "Failed to get theme usages", log.String("id", id), log.Error(err))
+		return nil, &tidcommon.InternalServerError
+	}
+
+	return resourcedependency.PaginateUsages(result, limit, offset), nil
+}
+
+// validateThemePreferences validates the theme JSON.
+func (ts *themeMgtService) validateThemePreferences(
+	ctx context.Context, theme json.RawMessage) *tidcommon.ServiceError {
+	if len(theme) == 0 {
+		return &ErrorMissingTheme
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(theme, &result); err != nil {
+		ts.logger.Debug(ctx, "Invalid theme JSON", log.Error(err))
+		return &ErrorInvalidThemeFormat
+	}
+
+	return nil
+}
+
+// validatePaginationParams validates limit and offset parameters.
+func validatePaginationParams(limit, offset int) *tidcommon.ServiceError {
+	if limit < 1 || limit > serverconst.MaxPageSize {
+		return tidcommon.CustomServiceError(ErrorInvalidLimitValue, tidcommon.I18nMessage{
+			Key:          "error.themeservice.invalid_limit_value_description",
+			DefaultValue: "Limit must be between 1 and {{param(max)}}",
+			Params:       map[string]string{"max": strconv.Itoa(serverconst.MaxPageSize)},
+		})
+	}
+
+	if offset < 0 {
+		return &ErrorInvalidOffsetValue
+	}
+
+	return nil
+}
+
+// buildPaginationLinks builds pagination links for the response.
+func buildPaginationLinks(limit, offset, totalCount int) []Link {
+	links := make([]Link, 0)
+
+	// Previous link
+	if offset > 0 {
+		prevOffset := offset - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		links = append(links, Link{
+			Href: fmt.Sprintf("/design/themes?limit=%d&offset=%d", limit, prevOffset),
+			Rel:  "previous",
+		})
+	}
+
+	// Next link
+	if offset+limit < totalCount {
+		nextOffset := offset + limit
+		links = append(links, Link{
+			Href: fmt.Sprintf("/design/themes?limit=%d&offset=%d", limit, nextOffset),
+			Rel:  "next",
+		})
+	}
+
+	return links
+}

@@ -1,0 +1,122 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Package service provides health check-related business logic and operations.
+package service
+
+import (
+	"context"
+
+	"github.com/thunder-id/thunderid/internal/system/config"
+	dbmodel "github.com/thunder-id/thunderid/internal/system/database/model"
+	"github.com/thunder-id/thunderid/internal/system/database/provider"
+	"github.com/thunder-id/thunderid/internal/system/healthcheck/model"
+	"github.com/thunder-id/thunderid/internal/system/log"
+)
+
+// HealthCheckServiceInterface defines the interface for the health check service.
+type HealthCheckServiceInterface interface {
+	CheckReadiness(ctx context.Context) model.ServerStatus
+}
+
+// HealthCheckService is the default implementation of the HealthCheckServiceInterface.
+type HealthCheckService struct {
+	DBProvider    provider.DBProviderInterface
+	RedisProvider provider.RedisProviderInterface
+}
+
+// Initialize creates a new instance of HealthCheckService with the provided dependencies.
+func Initialize(dbProvider provider.DBProviderInterface,
+	redisProvider provider.RedisProviderInterface) HealthCheckServiceInterface {
+	return &HealthCheckService{
+		DBProvider:    dbProvider,
+		RedisProvider: redisProvider,
+	}
+}
+
+// CheckReadiness checks the readiness of the server and its dependencies.
+func (hcs *HealthCheckService) CheckReadiness(ctx context.Context) model.ServerStatus {
+	configDBStatus := model.ServiceStatus{
+		ServiceName: "ConfigDB",
+		Status:      hcs.checkConfigDatabaseStatus(ctx, queryConfigDBTable),
+	}
+
+	runtimeTransientDBStatus := model.ServiceStatus{
+		ServiceName: "RuntimeTransientDB",
+		Status:      hcs.checkRuntimeDatabaseStatus(ctx, queryRuntimeTransientDBTable),
+	}
+
+	entityDBStatus := model.ServiceStatus{
+		ServiceName: "EntityDB",
+		Status:      hcs.checkEntityDatabaseStatus(ctx, queryEntityDBTable),
+	}
+
+	status := model.StatusUp
+	if configDBStatus.Status == model.StatusDown ||
+		runtimeTransientDBStatus.Status == model.StatusDown ||
+		entityDBStatus.Status == model.StatusDown {
+		status = model.StatusDown
+	}
+	return model.ServerStatus{
+		Status: status,
+		ServiceStatus: []model.ServiceStatus{
+			configDBStatus,
+			runtimeTransientDBStatus,
+			entityDBStatus,
+		},
+	}
+}
+
+// checkConfigDatabaseStatus checks the status of the config database with the specified query.
+func (hcs *HealthCheckService) checkConfigDatabaseStatus(ctx context.Context, query dbmodel.DBQuery) model.Status {
+	dbClient, err := hcs.DBProvider.GetConfigDBClient()
+	return hcs.executeDatabaseHealthCheck(ctx, "ConfigDB", dbClient, err, query)
+}
+
+// checkRuntimeDatabaseStatus checks the status of the runtime transient database with the specified query.
+func (hcs *HealthCheckService) checkRuntimeDatabaseStatus(ctx context.Context, query dbmodel.DBQuery) model.Status {
+	if config.GetServerRuntime().Config.Database.RuntimeTransient.Type == provider.DataSourceTypeRedis {
+		return hcs.checkRedisRuntimeStatus(ctx)
+	}
+	dbClient, err := hcs.DBProvider.GetRuntimeTransientDBClient()
+	return hcs.executeDatabaseHealthCheck(ctx, "RuntimeTransientDB", dbClient, err, query)
+}
+
+// checkRedisRuntimeStatus checks the health of the Redis runtime store via Ping.
+func (hcs *HealthCheckService) checkRedisRuntimeStatus(ctx context.Context) model.Status {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "HealthCheckService"))
+	if hcs.RedisProvider == nil {
+		logger.Error(ctx, "Redis runtime provider is not initialized")
+		return model.StatusDown
+	}
+	if err := hcs.RedisProvider.GetRedisClient().Ping(context.Background()).Err(); err != nil {
+		logger.Error(ctx, "Failed to ping Redis runtime store", log.Error(err))
+		return model.StatusDown
+	}
+	return model.StatusUp
+}
+
+// checkEntityDatabaseStatus checks the status of the entity database with the specified query.
+func (hcs *HealthCheckService) checkEntityDatabaseStatus(ctx context.Context, query dbmodel.DBQuery) model.Status {
+	dbClient, err := hcs.DBProvider.GetEntityDBClient()
+	return hcs.executeDatabaseHealthCheck(ctx, "EntityDB", dbClient, err, query)
+}
+
+// executeDatabaseHealthCheck runs the provided query on the given database client and reports its status.
+func (hcs *HealthCheckService) executeDatabaseHealthCheck(ctx context.Context,
+	dbName string, dbClient provider.DBClientInterface, err error, query dbmodel.DBQuery,
+) model.Status {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "HealthCheckService"))
+
+	if err != nil {
+		logger.Error(ctx, "Failed to get database client", log.String("dbname", dbName), log.Error(err))
+		return model.StatusDown
+	}
+
+	_, err = dbClient.Query(query)
+	if err != nil {
+		logger.Error(ctx, "Failed to execute query", log.String("dbname", dbName), log.Error(err))
+		return model.StatusDown
+	}
+	return model.StatusUp
+}

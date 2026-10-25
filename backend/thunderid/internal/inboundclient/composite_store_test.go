@@ -1,0 +1,414 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package inboundclient
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	inboundmodel "github.com/thunder-id/thunderid/internal/inboundclient/model"
+	sysconfig "github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+type CompositeStoreTestSuite struct {
+	suite.Suite
+	fileStore *fileBasedStore
+	dbMock    *inboundClientStoreInterfaceMock
+	composite inboundClientStoreInterface
+}
+
+func TestCompositeStoreTestSuite(t *testing.T) {
+	suite.Run(t, new(CompositeStoreTestSuite))
+}
+
+func (suite *CompositeStoreTestSuite) SetupTest() {
+	sysconfig.ResetServerRuntime()
+	suite.Require().NoError(sysconfig.InitializeServerRuntime("/tmp/test", &sysconfig.Config{}))
+	suite.fileStore = newFileBasedStoreForTest()
+	suite.dbMock = newInboundClientStoreInterfaceMock(suite.T())
+	suite.composite = newCompositeStore(suite.fileStore, suite.dbMock)
+}
+
+// GetTotalInboundClientCount sums DB and file counts.
+func (suite *CompositeStoreTestSuite) TestGetTotalInboundClientCount_SumsBoth() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().GetTotalInboundClientCount(mock.Anything).Return(3, nil)
+
+	// Add 2 entries to file store
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "f1"}))
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "f2"}))
+
+	count, err := suite.composite.GetTotalInboundClientCount(ctx)
+	suite.NoError(err)
+	suite.Equal(5, count)
+}
+
+// GetInboundClientList merges DB and file clients.
+func (suite *CompositeStoreTestSuite) TestGetInboundClientList_MergesBoth() {
+	ctx := context.Background()
+	dbClients := []inboundmodel.InboundClient{{ID: "db1"}}
+	suite.dbMock.EXPECT().GetTotalInboundClientCount(mock.Anything).Return(1, nil).Maybe()
+	suite.dbMock.EXPECT().GetInboundClientList(mock.Anything, mock.Anything).Return(dbClients, nil)
+
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "f1"}))
+
+	list, err := suite.composite.GetInboundClientList(ctx, 0)
+	suite.NoError(err)
+	suite.NotEmpty(list)
+	ids := make(map[string]bool)
+	for _, c := range list {
+		ids[c.ID] = true
+	}
+	suite.True(ids["db1"])
+	suite.True(ids["f1"])
+}
+
+// GetInboundClientByEntityID — DB has it.
+func (suite *CompositeStoreTestSuite) TestGetInboundClientByEntityID_FromDB() {
+	ctx := context.Background()
+	want := &inboundmodel.InboundClient{ID: "db1"}
+	suite.dbMock.EXPECT().GetInboundClientByEntityID(mock.Anything, "db1").Return(want, nil)
+
+	got, err := suite.composite.GetInboundClientByEntityID(ctx, "db1")
+	suite.NoError(err)
+	suite.Equal("db1", got.ID)
+}
+
+// GetInboundClientByEntityID — not in DB, falls back to file store.
+func (suite *CompositeStoreTestSuite) TestGetInboundClientByEntityID_FallsBackToFile() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().GetInboundClientByEntityID(mock.Anything, "f1").Return(nil, ErrInboundClientNotFound)
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "f1"}))
+
+	got, err := suite.composite.GetInboundClientByEntityID(ctx, "f1")
+	suite.NoError(err)
+	suite.Equal("f1", got.ID)
+}
+
+// GetInboundClientByEntityID — not found anywhere.
+func (suite *CompositeStoreTestSuite) TestGetInboundClientByEntityID_NotFound() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().GetInboundClientByEntityID(mock.Anything, "missing").Return(nil, ErrInboundClientNotFound)
+
+	got, err := suite.composite.GetInboundClientByEntityID(ctx, "missing")
+	suite.Nil(got)
+	suite.ErrorIs(err, ErrInboundClientNotFound)
+}
+
+// GetOAuthProfileByEntityID — DB has it.
+func (suite *CompositeStoreTestSuite) TestGetOAuthProfileByEntityID_FromDB() {
+	ctx := context.Background()
+	want := &providers.OAuthProfile{GrantTypes: []string{"authorization_code"}}
+	suite.dbMock.EXPECT().GetOAuthProfileByEntityID(mock.Anything, "db1").Return(want, nil)
+
+	got, err := suite.composite.GetOAuthProfileByEntityID(ctx, "db1")
+	suite.NoError(err)
+	suite.Equal(want, got)
+}
+
+// GetOAuthProfileByEntityID — falls back to file store.
+func (suite *CompositeStoreTestSuite) TestGetOAuthProfileByEntityID_FallsBackToFile() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().GetOAuthProfileByEntityID(mock.Anything, "f1").Return(nil, ErrInboundClientNotFound)
+
+	profileData := providers.OAuthProfile{GrantTypes: []string{"authorization_code"}}
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{
+		ID:         "f1",
+		Properties: map[string]interface{}{PropOAuthProfile: profileData},
+	}))
+
+	got, err := suite.composite.GetOAuthProfileByEntityID(ctx, "f1")
+	suite.NoError(err)
+	suite.Equal([]string{"authorization_code"}, got.GrantTypes)
+}
+
+// CreateInboundClient delegates to DB store.
+func (suite *CompositeStoreTestSuite) TestCreateInboundClient_DelegatesToDB() {
+	ctx := context.Background()
+	client := inboundmodel.InboundClient{ID: "new1"}
+	suite.dbMock.EXPECT().CreateInboundClient(mock.Anything, client).Return(nil)
+
+	err := suite.composite.CreateInboundClient(ctx, client)
+	suite.NoError(err)
+}
+
+// CreateOAuthProfile delegates to DB store.
+func (suite *CompositeStoreTestSuite) TestCreateOAuthProfile_DelegatesToDB() {
+	ctx := context.Background()
+	p := &providers.OAuthProfile{}
+	suite.dbMock.EXPECT().CreateOAuthProfile(mock.Anything, "e1", p).Return(nil)
+
+	err := suite.composite.CreateOAuthProfile(ctx, "e1", p)
+	suite.NoError(err)
+}
+
+// UpdateInboundClient delegates to DB store.
+func (suite *CompositeStoreTestSuite) TestUpdateInboundClient_DelegatesToDB() {
+	ctx := context.Background()
+	client := inboundmodel.InboundClient{ID: "u1"}
+	suite.dbMock.EXPECT().UpdateInboundClient(mock.Anything, client).Return(nil)
+
+	err := suite.composite.UpdateInboundClient(ctx, client)
+	suite.NoError(err)
+}
+
+// UpdateOAuthProfile delegates to DB store.
+func (suite *CompositeStoreTestSuite) TestUpdateOAuthProfile_DelegatesToDB() {
+	ctx := context.Background()
+	p := &providers.OAuthProfile{}
+	suite.dbMock.EXPECT().UpdateOAuthProfile(mock.Anything, "e1", p).Return(nil)
+
+	err := suite.composite.UpdateOAuthProfile(ctx, "e1", p)
+	suite.NoError(err)
+}
+
+// DeleteInboundClient delegates to DB store.
+func (suite *CompositeStoreTestSuite) TestDeleteInboundClient_DelegatesToDB() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().DeleteInboundClient(mock.Anything, "e1").Return(nil)
+
+	err := suite.composite.DeleteInboundClient(ctx, "e1")
+	suite.NoError(err)
+}
+
+// DeleteOAuthProfile delegates to DB store.
+func (suite *CompositeStoreTestSuite) TestDeleteOAuthProfile_DelegatesToDB() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().DeleteOAuthProfile(mock.Anything, "e1").Return(nil)
+
+	err := suite.composite.DeleteOAuthProfile(ctx, "e1")
+	suite.NoError(err)
+}
+
+// InboundClientExists — found in file store.
+func (suite *CompositeStoreTestSuite) TestInboundClientExists_InFileStore() {
+	ctx := context.Background()
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "f1"}))
+
+	exists, err := suite.composite.InboundClientExists(ctx, "f1")
+	suite.NoError(err)
+	suite.True(exists)
+}
+
+// InboundClientExists — found in DB store.
+func (suite *CompositeStoreTestSuite) TestInboundClientExists_InDBStore() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().InboundClientExists(mock.Anything, "db1").Return(true, nil)
+
+	exists, err := suite.composite.InboundClientExists(ctx, "db1")
+	suite.NoError(err)
+	suite.True(exists)
+}
+
+// InboundClientExists — not found in either.
+func (suite *CompositeStoreTestSuite) TestInboundClientExists_NotFound() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().InboundClientExists(mock.Anything, "missing").Return(false, nil)
+
+	exists, err := suite.composite.InboundClientExists(ctx, "missing")
+	suite.NoError(err)
+	suite.False(exists)
+}
+
+// IsDeclarative — true when entity is in file store.
+func (suite *CompositeStoreTestSuite) TestIsDeclarative_True() {
+	ctx := context.Background()
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx, inboundmodel.InboundClient{ID: "f1"}))
+
+	suite.True(suite.composite.IsDeclarative(ctx, "f1"))
+}
+
+// IsDeclarative — false when entity is not in file store.
+func (suite *CompositeStoreTestSuite) TestIsDeclarative_False() {
+	ctx := context.Background()
+
+	suite.False(suite.composite.IsDeclarative(ctx, "db1"))
+}
+
+// mergeAndDeduplicateInboundClients — DB entries are mutable, file entries declarative.
+func (suite *CompositeStoreTestSuite) TestMergeAndDeduplicate_SetsReadOnly() {
+	dbClients := []inboundmodel.InboundClient{{ID: "shared"}, {ID: "dbonly"}}
+	fileClients := []inboundmodel.InboundClient{{ID: "shared"}, {ID: "fileonly"}}
+
+	result := mergeAndDeduplicateInboundClients(dbClients, fileClients)
+	suite.Len(result, 3)
+
+	byID := make(map[string]inboundmodel.InboundClient)
+	for _, c := range result {
+		byID[c.ID] = c
+	}
+
+	suite.False(byID["shared"].IsReadOnly)
+	suite.False(byID["dbonly"].IsReadOnly)
+	suite.True(byID["fileonly"].IsReadOnly)
+}
+
+// --- GetEntityIDsByThemeID composite store tests ---
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_OnlyDB() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"db-1", "db-2"}, 2, nil)
+
+	ids, total, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.NoError(err)
+	suite.Equal(2, total)
+	suite.ElementsMatch([]string{"db-1", "db-2"}, ids)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_MergesDBAndFile() {
+	ctx := context.Background()
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx,
+		inboundmodel.InboundClient{ID: "file-1", ThemeID: "theme-1"}))
+
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"db-1"}, 1, nil)
+
+	ids, total, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.NoError(err)
+	suite.Equal(2, total)
+	suite.ElementsMatch([]string{"db-1", "file-1"}, ids)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_DeduplicatesOverlap() {
+	ctx := context.Background()
+	suite.Require().NoError(suite.fileStore.CreateInboundClient(ctx,
+		inboundmodel.InboundClient{ID: "shared", ThemeID: "theme-1"}))
+
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"shared", "db-only"}, 2, nil)
+
+	ids, total, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.NoError(err)
+	suite.Equal(2, total)
+	suite.ElementsMatch([]string{"shared", "db-only"}, ids)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_DBError() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return(nil, 0, errors.New("db error"))
+
+	_, _, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.Error(err)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_Pagination() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"db-1", "db-2", "db-3"}, 3, nil)
+
+	ids, total, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 2, 1)
+	suite.NoError(err)
+	suite.Equal(3, total)
+	suite.Len(ids, 2)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_OffsetBeyondTotal() {
+	ctx := context.Background()
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"db-1"}, 1, nil)
+
+	ids, total, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 5)
+	suite.NoError(err)
+	suite.Equal(1, total)
+	suite.Empty(ids)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_DBHitsCap() {
+	ctx := context.Background()
+	// Exactly MaxCompositeStoreRecords (1000) entries from DB triggers the limit error.
+	capIDs := make([]string, 1000)
+	for i := range capIDs {
+		capIDs[i] = "db-id"
+	}
+	suite.dbMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return(capIDs, 1000, nil)
+
+	ids, total, err := suite.composite.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.ErrorIs(err, ErrCompositeResultLimitExceeded)
+	suite.Nil(ids)
+	suite.Equal(0, total)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_FileStoreError() {
+	ctx := context.Background()
+	// DB returns normally; file store fails — error must propagate.
+	// We use a file store populated with an entry that has the wrong theme so
+	// GetEntityIDsByThemeID returns an error via a mock on the composite's dbStore.
+	// Since fileStore is a real *fileBasedStore, we force an error by testing the
+	// composite store using a mock for the file side via a fresh compositeStore
+	// that wraps two mocks.
+	dbMock2 := newInboundClientStoreInterfaceMock(suite.T())
+	fileMock := newInboundClientStoreInterfaceMock(suite.T())
+	composite2 := &compositeStore{dbStore: dbMock2, fileStore: fileMock}
+
+	dbMock2.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"db-1"}, 1, nil)
+	fileMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return(nil, 0, errors.New("file store error"))
+
+	ids, total, err := composite2.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.Error(err)
+	suite.Nil(ids)
+	suite.Equal(0, total)
+}
+
+func (suite *CompositeStoreTestSuite) TestGetEntityIDsByThemeID_FileHitsCap() {
+	ctx := context.Background()
+	capIDs := make([]string, 1000)
+	for i := range capIDs {
+		capIDs[i] = "file-id"
+	}
+	dbMock2 := newInboundClientStoreInterfaceMock(suite.T())
+	fileMock := newInboundClientStoreInterfaceMock(suite.T())
+	composite2 := &compositeStore{dbStore: dbMock2, fileStore: fileMock}
+
+	dbMock2.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return([]string{"db-1"}, 1, nil)
+	fileMock.EXPECT().
+		GetEntityIDsByReference(
+			mock.Anything, resourcedependency.ResourceTypeTheme, "theme-1", mock.AnythingOfType("int"), 0).
+		Return(capIDs, 1000, nil)
+
+	ids, total, err := composite2.GetEntityIDsByReference(
+		ctx, resourcedependency.ResourceTypeTheme, "theme-1", 10, 0)
+	suite.ErrorIs(err, ErrCompositeResultLimitExceeded)
+	suite.Nil(ids)
+	suite.Equal(0, total)
+}

@@ -1,0 +1,518 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package flowmgt
+
+import (
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+
+	"context"
+	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/mcp/tool"
+)
+
+type FlowToolsTestSuite struct {
+	suite.Suite
+}
+
+func TestFlowToolsTestSuite(t *testing.T) {
+	suite.Run(t, new(FlowToolsTestSuite))
+}
+
+func (suite *FlowToolsTestSuite) TestNewFlowTools() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	assert.NotNil(suite.T(), tools)
+	assert.Equal(suite.T(), mockService, tools.flowService)
+}
+
+func (suite *FlowToolsTestSuite) TestListFlows_Success() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	expectedFlows := []BasicFlowDefinition{
+		{
+			ID:       "flow1",
+			Handle:   "basic-login",
+			Name:     "Basic Login",
+			FlowType: providers.FlowTypeAuthentication,
+		},
+		{
+			ID:       "flow2",
+			Handle:   "registration",
+			Name:     "User Registration",
+			FlowType: providers.FlowTypeRegistration,
+		},
+	}
+
+	mockService.On("ListFlows", mock.Anything, 30, 0, providers.FlowType("")).Return(&FlowListResponse{
+		TotalResults: 2,
+		Flows:        expectedFlows,
+	}, nil)
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := listFlowsInput{
+		PaginationInput: tool.PaginationInput{Limit: 0, Offset: 0},
+		FlowType:        "",
+	}
+
+	result, output, err := tools.listFlows(ctx, req, input)
+
+	assert.NoError(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), 2, output.TotalCount)
+	assert.Len(suite.T(), output.Flows, 2)
+	assert.Equal(suite.T(), "flow1", output.Flows[0].ID)
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestListFlows_WithFilter() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	expectedFlows := []BasicFlowDefinition{
+		{
+			ID:       "flow1",
+			Handle:   "basic-login",
+			Name:     "Basic Login",
+			FlowType: providers.FlowTypeAuthentication,
+		},
+	}
+
+	mockService.On(
+		"ListFlows",
+		mock.Anything,
+		30,
+		0,
+		providers.FlowTypeAuthentication,
+	).Return(&FlowListResponse{
+		TotalResults: 1,
+		Flows:        expectedFlows,
+	}, nil)
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := listFlowsInput{
+		PaginationInput: tool.PaginationInput{Limit: 0, Offset: 0},
+		FlowType:        string(providers.FlowTypeAuthentication),
+	}
+
+	result, output, err := tools.listFlows(ctx, req, input)
+
+	assert.NoError(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), 1, output.TotalCount)
+	assert.Len(suite.T(), output.Flows, 1)
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestListFlows_Error() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	mockService.On("ListFlows", mock.Anything, 30, 0, providers.FlowType("")).
+		Return(nil, &tidcommon.ServiceError{
+			ErrorDescription: tidcommon.I18nMessage{Key: "error.test.database_error", DefaultValue: "database error"},
+		})
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := listFlowsInput{
+		PaginationInput: tool.PaginationInput{Limit: 0, Offset: 0},
+		FlowType:        "",
+	}
+
+	result, output, err := tools.listFlows(ctx, req, input)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), flowListOutput{}, output)
+	assert.Contains(suite.T(), err.Error(), "failed to list flows")
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestGetFlowByHandle_Success() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	expectedFlow := &providers.CompleteFlowDefinition{
+		ID:       "flow123",
+		Handle:   "basic-login",
+		Name:     "Basic Login Flow",
+		FlowType: providers.FlowTypeAuthentication,
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:   "start",
+				Type: "START",
+			},
+			{
+				ID:   "end",
+				Type: "END",
+			},
+		},
+	}
+
+	mockService.On(
+		"GetFlowByHandle",
+		mock.Anything,
+		"basic-login",
+		providers.FlowTypeAuthentication,
+	).Return(expectedFlow, nil)
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := getFlowByHandleInput{
+		Handle:   "basic-login",
+		FlowType: string(providers.FlowTypeAuthentication),
+	}
+
+	result, output, err := tools.getFlowByHandle(ctx, req, input)
+
+	assert.NoError(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), expectedFlow, output)
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestGetFlowByHandle_Error() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	mockService.On(
+		"GetFlowByHandle",
+		mock.Anything,
+		"nonexistent",
+		providers.FlowTypeAuthentication,
+	).Return(nil, &tidcommon.ServiceError{
+		ErrorDescription: tidcommon.I18nMessage{Key: "error.test.flow_not_found", DefaultValue: "flow not found"},
+	})
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := getFlowByHandleInput{
+		Handle:   "nonexistent",
+		FlowType: string(providers.FlowTypeAuthentication),
+	}
+
+	result, output, err := tools.getFlowByHandle(ctx, req, input)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Nil(suite.T(), output)
+	assert.Contains(suite.T(), err.Error(), "failed to get flow by handle")
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestGetFlowByID_Success() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	expectedFlow := &providers.CompleteFlowDefinition{
+		ID:       "flow123",
+		Handle:   "basic-login",
+		Name:     "Basic Login Flow",
+		FlowType: providers.FlowTypeAuthentication,
+	}
+
+	mockService.On("GetFlow", mock.Anything, "flow123").Return(expectedFlow, nil)
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := tool.IDInput{ID: "flow123"}
+
+	result, output, err := tools.getFlowByID(ctx, req, input)
+
+	assert.NoError(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), expectedFlow, output)
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestGetFlowByID_Error() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	mockService.On("GetFlow", mock.Anything, "flow123").Return(nil, &tidcommon.ServiceError{
+		ErrorDescription: tidcommon.I18nMessage{Key: "error.test.flow_not_found", DefaultValue: "flow not found"},
+	})
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+	input := tool.IDInput{ID: "flow123"}
+
+	result, output, err := tools.getFlowByID(ctx, req, input)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Nil(suite.T(), output)
+	assert.Contains(suite.T(), err.Error(), "failed to get flow")
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestCreateFlow_Success() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	inputFlow := FlowDefinition{
+		Handle:   "new-flow",
+		Name:     "New Flow",
+		FlowType: providers.FlowTypeAuthentication,
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:   "start",
+				Type: "START",
+			},
+			{
+				ID:   "end",
+				Type: "END",
+			},
+		},
+	}
+
+	createdFlow := &providers.CompleteFlowDefinition{
+		ID:       "new-flow-id",
+		Handle:   "new-flow",
+		Name:     "New Flow",
+		FlowType: providers.FlowTypeAuthentication,
+		Nodes:    inputFlow.Nodes,
+	}
+
+	mockService.On("CreateFlow", mock.Anything, &inputFlow).Return(createdFlow, nil)
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+
+	result, output, err := tools.createFlow(ctx, req, inputFlow)
+
+	assert.NoError(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), createdFlow, output)
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestCreateFlow_Error() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	inputFlow := FlowDefinition{
+		Handle:   "invalid-flow",
+		Name:     "Invalid Flow",
+		FlowType: providers.FlowTypeAuthentication,
+	}
+
+	mockService.On("CreateFlow", mock.Anything, &inputFlow).Return(nil, &tidcommon.ServiceError{
+		ErrorDescription: tidcommon.I18nMessage{Key: "error.test.validation_error", DefaultValue: "validation error"},
+	})
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+
+	result, output, err := tools.createFlow(ctx, req, inputFlow)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Nil(suite.T(), output)
+	assert.Contains(suite.T(), err.Error(), "failed to create flow")
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestUpdateFlow_Success() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	currentFlow := &providers.CompleteFlowDefinition{
+		ID:       "flow123",
+		Handle:   "existing-flow",
+		Name:     "Old Name",
+		FlowType: providers.FlowTypeAuthentication,
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:   "start",
+				Type: "START",
+			},
+		},
+	}
+
+	inputUpdate := updateFlowInput{
+		ID:   "flow123",
+		Name: "Updated Name",
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:   "start",
+				Type: "START",
+			},
+			{
+				ID:   "end",
+				Type: "END",
+			},
+		},
+	}
+
+	updatedFlow := &providers.CompleteFlowDefinition{
+		ID:       "flow123",
+		Handle:   "existing-flow",
+		Name:     "Updated Name",
+		FlowType: providers.FlowTypeAuthentication,
+		Nodes:    inputUpdate.Nodes,
+	}
+
+	mockService.On("GetFlow", mock.Anything, "flow123").Return(currentFlow, nil)
+	mockService.On("UpdateFlow", mock.Anything, "flow123", &FlowDefinition{
+		Handle:   "existing-flow",
+		FlowType: providers.FlowTypeAuthentication,
+		Name:     "Updated Name",
+		Nodes:    inputUpdate.Nodes,
+	}).Return(updatedFlow, nil)
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+
+	result, output, err := tools.updateFlow(ctx, req, inputUpdate)
+
+	assert.NoError(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Equal(suite.T(), updatedFlow, output)
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestUpdateFlow_GetFlowError() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	inputUpdate := updateFlowInput{
+		ID:   "flow123",
+		Name: "Updated Name",
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:   "start",
+				Type: "START",
+			},
+		},
+	}
+
+	mockService.On("GetFlow", mock.Anything, "flow123").Return(nil, &tidcommon.ServiceError{
+		ErrorDescription: tidcommon.I18nMessage{Key: "error.test.flow_not_found", DefaultValue: "flow not found"},
+	})
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+
+	result, output, err := tools.updateFlow(ctx, req, inputUpdate)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Nil(suite.T(), output)
+	assert.Contains(suite.T(), err.Error(), "failed to get flow")
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestUpdateFlow_UpdateError() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	tools := &flowTools{flowService: mockService}
+
+	currentFlow := &providers.CompleteFlowDefinition{
+		ID:       "flow123",
+		Handle:   "existing-flow",
+		Name:     "Old Name",
+		FlowType: providers.FlowTypeAuthentication,
+	}
+
+	inputUpdate := updateFlowInput{
+		ID:   "flow123",
+		Name: "Updated Name",
+		Nodes: []providers.NodeDefinition{
+			{
+				ID:   "start",
+				Type: "START",
+			},
+		},
+	}
+
+	mockService.On("GetFlow", mock.Anything, "flow123").Return(currentFlow, nil)
+	mockService.On("UpdateFlow", mock.Anything, "flow123", &FlowDefinition{
+		Handle:   "existing-flow",
+		FlowType: providers.FlowTypeAuthentication,
+		Name:     "Updated Name",
+		Nodes:    inputUpdate.Nodes,
+	}).Return(nil, &tidcommon.ServiceError{
+		ErrorDescription: tidcommon.I18nMessage{Key: "error.test.validation_error", DefaultValue: "validation error"},
+	})
+
+	ctx := context.Background()
+	req := &mcp.CallToolRequest{}
+
+	result, output, err := tools.updateFlow(ctx, req, inputUpdate)
+
+	assert.Error(suite.T(), err)
+	assert.Nil(suite.T(), result)
+	assert.Nil(suite.T(), output)
+	assert.Contains(suite.T(), err.Error(), "failed to update flow")
+
+	mockService.AssertExpectations(suite.T())
+}
+
+func (suite *FlowToolsTestSuite) TestRegisterMCPTools() {
+	mockService := NewFlowMgtServiceInterfaceMock(suite.T())
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "test-server",
+		Version: "1.0.0",
+	}, nil)
+
+	// Register tools
+	registerMCPTools(server, mockService)
+
+	// Verify tools are registered by checking server has tools
+	// Note: We can't directly verify the tools list without accessing internal server state,
+	// but we can verify the function doesn't panic
+	assert.NotNil(suite.T(), server)
+}
+
+func (suite *FlowToolsTestSuite) TestGetListFlowsSchema() {
+	schema := getListFlowsSchema()
+
+	assert.NotNil(suite.T(), schema)
+}
+
+func (suite *FlowToolsTestSuite) TestGetFlowByHandleSchema() {
+	schema := getFlowByHandleSchema()
+
+	assert.NotNil(suite.T(), schema)
+}
+
+func (suite *FlowToolsTestSuite) TestGetFlowByIDSchema() {
+	schema := getFlowByIDSchema()
+
+	assert.NotNil(suite.T(), schema)
+}
+
+func (suite *FlowToolsTestSuite) TestGetCreateFlowSchema() {
+	schema := getCreateFlowSchema()
+
+	assert.NotNil(suite.T(), schema)
+}
+
+func (suite *FlowToolsTestSuite) TestGetUpdateFlowSchema() {
+	schema := getUpdateFlowSchema()
+
+	assert.NotNil(suite.T(), schema)
+}

@@ -1,0 +1,19 @@
+# Local/runtime files must not enter the submission.
+.gradle/
+.kotlin/
+.idea/
+**/build/
+**/local.properties
+**/.env
+*.apk
+*.aab
+*.pfx
+*.p12
+*.jks
+*.keystore
+*.bak
+state/
+backups/
+SetuPass_Backups/
+*.log
+# Keep upstream cryptographic test fixtures and schema SQL: they are source fixtures.

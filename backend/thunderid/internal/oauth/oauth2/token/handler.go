@@ -1,0 +1,135 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package token
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/clientauth"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/constants"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/model"
+	sysconst "github.com/thunder-id/thunderid/internal/system/constants"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/utils"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+// TokenHandlerInterface defines the interface for handling OAuth 2.0 token requests.
+type TokenHandlerInterface interface {
+	HandleTokenRequest(w http.ResponseWriter, r *http.Request)
+}
+
+// tokenHandler implements the TokenHandlerInterface.
+type tokenHandler struct {
+	tokenService     TokenServiceInterface
+	observabilitySvc providers.ObservabilityProvider
+}
+
+// newTokenHandler creates a new instance of tokenHandler.
+func newTokenHandler(
+	tokenService TokenServiceInterface,
+	observabilitySvc providers.ObservabilityProvider,
+) TokenHandlerInterface {
+	return &tokenHandler{
+		tokenService:     tokenService,
+		observabilitySvc: observabilitySvc,
+	}
+}
+
+// HandleTokenRequest handles the token request for OAuth 2.0.
+// It parses the HTTP request, delegates processing to the token service, and writes the HTTP response.
+func (th *tokenHandler) HandleTokenRequest(w http.ResponseWriter, r *http.Request) {
+	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, "TokenHandler"))
+
+	startTime := time.Now().UnixMilli()
+
+	// Parse the form data from the request body.
+	if err := r.ParseForm(); err != nil {
+		publishTokenIssuanceFailedEvent(th.observabilitySvc, r.Context(), "", "", "",
+			http.StatusBadRequest, err.Error(), startTime)
+		utils.WriteJSONError(r.Context(), w, constants.ErrorInvalidRequest,
+			"Failed to parse request body", http.StatusBadRequest, nil)
+		return
+	}
+
+	// The DPoP header must appear at most once.
+	dpopHeaders := r.Header.Values(constants.HeaderDPoP)
+	if len(dpopHeaders) > 1 {
+		publishTokenIssuanceFailedEvent(th.observabilitySvc, r.Context(), "", "", "",
+			http.StatusBadRequest, "Multiple DPoP headers", startTime)
+		utils.WriteJSONError(r.Context(), w, constants.ErrorInvalidDPoPProof,
+			"Multiple DPoP headers", http.StatusBadRequest, nil)
+		return
+	}
+	ctx := r.Context()
+	if len(dpopHeaders) == 1 {
+		ctx = dpop.WithProof(ctx, dpopHeaders[0])
+	}
+
+	// Get authenticated client from context (set by ClientAuthMiddleware).
+	clientInfo := clientauth.GetOAuthClient(r.Context())
+	if clientInfo == nil {
+		logger.Error(ctx, "OAuth client not found in context - ClientAuthMiddleware must be applied")
+		utils.WriteJSONError(r.Context(), w, constants.ErrorServerError,
+			"Something went wrong", http.StatusInternalServerError, nil)
+		return
+	}
+
+	// Build the token request domain model from the HTTP form values.
+	tokenRequest := &model.TokenRequest{
+		GrantType:          r.FormValue(constants.RequestParamGrantType),
+		ClientID:           clientInfo.ClientID,
+		ClientSecret:       clientInfo.ClientSecret,
+		Scope:              r.FormValue("scope"),
+		Username:           r.FormValue("username"),
+		Password:           r.FormValue("password"),
+		RefreshToken:       r.FormValue("refresh_token"),
+		CodeVerifier:       r.FormValue("code_verifier"),
+		Code:               r.FormValue("code"),
+		RedirectURI:        r.FormValue("redirect_uri"),
+		Resources:          r.Form[constants.RequestParamResource],
+		SubjectToken:       r.FormValue(constants.RequestParamSubjectToken),
+		SubjectTokenType:   r.FormValue(constants.RequestParamSubjectTokenType),
+		ActorToken:         r.FormValue(constants.RequestParamActorToken),
+		ActorTokenType:     r.FormValue(constants.RequestParamActorTokenType),
+		RequestedTokenType: r.FormValue(constants.RequestParamRequestedTokenType),
+		Audiences:          r.Form[constants.RequestParamAudience],
+		AuthReqID:          r.FormValue(constants.RequestParamAuthReqID),
+		Assertion:          r.FormValue(constants.RequestParamAssertion),
+	}
+
+	// Delegate all business logic to the token service.
+	tokenResponse, tokenError := th.tokenService.ProcessTokenRequest(ctx, tokenRequest, clientInfo.OAuthApp)
+	if tokenError != nil {
+		if tokenError.Error != "" {
+			var statusCode int
+			switch tokenError.Error {
+			case constants.ErrorServerError:
+				statusCode = http.StatusInternalServerError
+			default:
+				statusCode = http.StatusBadRequest
+			}
+			description := tokenError.ErrorDescription
+			if tokenError.Error == constants.ErrorInvalidDPoPProof {
+				logger.Debug(ctx, "DPoP proof rejected", log.String("error", description))
+				description = "Invalid DPoP proof"
+			}
+			utils.WriteJSONError(r.Context(), w, tokenError.Error, description, statusCode, nil)
+		} else {
+			utils.WriteJSONError(r.Context(), w, constants.ErrorServerError, "Something went wrong",
+				http.StatusInternalServerError, nil)
+		}
+		return
+	}
+
+	logger.Debug(ctx, "Token response sending", log.String("client_id", clientInfo.ClientID))
+
+	// Must include the following headers when sensitive data is returned.
+	w.Header().Set(sysconst.CacheControlHeaderName, sysconst.CacheControlNoStore)
+	w.Header().Set(sysconst.PragmaHeaderName, sysconst.PragmaNoCache)
+
+	utils.WriteSuccessResponse(r.Context(), w, http.StatusOK, tokenResponse)
+}

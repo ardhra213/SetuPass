@@ -1,0 +1,216 @@
+// Copyright 2026 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package inboundclient
+
+import (
+	"errors"
+
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
+
+	"github.com/thunder-id/thunderid/internal/cert"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+var (
+	// ErrInboundClientNotFound is returned when an inbound client is not found.
+	ErrInboundClientNotFound = errors.New("inbound client not found")
+
+	// ErrInboundClientDataCorrupted is returned when a file-based inbound client cannot be
+	// read back as the expected Go type.
+	ErrInboundClientDataCorrupted = errors.New("inbound client data is corrupted")
+
+	// ErrCompositeResultLimitExceeded is returned when the composite list result exceeds the
+	// configured limit across file + DB stores.
+	ErrCompositeResultLimitExceeded = errors.New("composite store result limit exceeded")
+
+	// ErrCannotModifyDeclarative is returned by mutating service methods (Create/Update/
+	// SyncOAuthProfile/Delete) when the targeted entity is sourced from a declarative file.
+	// Callers translate this into their own "declarative resource is read-only" error.
+	ErrCannotModifyDeclarative = errors.New("cannot modify declarative inbound client")
+)
+
+var (
+	// ErrFKInvalidAuthFlow and related errors are returned when a caller-supplied ID does not resolve.
+	ErrFKInvalidAuthFlow = errors.New("invalid auth flow ID")
+	// ErrFKInvalidRegistrationFlow is returned when the registration flow ID does not exist.
+	ErrFKInvalidRegistrationFlow = errors.New("invalid registration flow ID")
+	// ErrFKInvalidRecoveryFlow is returned when the recovery flow ID does not exist.
+	ErrFKInvalidRecoveryFlow = errors.New("invalid recovery flow ID")
+	// ErrFKInvalidSignOutFlow is returned when the sign-out flow ID does not exist.
+	ErrFKInvalidSignOutFlow = errors.New("invalid sign-out flow ID")
+	// ErrFKFlowDefinitionRetrievalFailed is returned when a flow definition cannot be retrieved.
+	ErrFKFlowDefinitionRetrievalFailed = errors.New("error retrieving flow definition")
+	// ErrFKFlowServerError is returned when a server error occurs while resolving a flow.
+	ErrFKFlowServerError = errors.New("server error while resolving flow")
+	// ErrFKThemeNotFound is returned when the specified theme does not exist.
+	ErrFKThemeNotFound = errors.New("theme not found")
+	// ErrFKLayoutNotFound is returned when the specified layout does not exist.
+	ErrFKLayoutNotFound = errors.New("layout not found")
+	// ErrFKInvalidUserType is returned when the specified user type is invalid.
+	ErrFKInvalidUserType = errors.New("invalid user type")
+	// ErrFKInvalidSubjectAttributeMapping is returned when the specified subject attribute mapping is invalid.
+	ErrFKInvalidSubjectAttributeMapping = errors.New("invalid subject attribute mapping")
+	// ErrUserSchemaLookupFailed is returned when the user-schema service fails (e.g. DB outage)
+	// while validating allowed user types. Distinct from ErrFKInvalidUserType so the handler
+	// can map it to a server error instead of a client validation error.
+	ErrUserSchemaLookupFailed = errors.New("user schema lookup failed")
+	// ErrUniqueAttributeLookupFailed is returned when the user-schema service fails (e.g. DB outage)
+	// while retrieving unique attributes for validation. Distinct from ErrFKInvalidSubjectAttributeMapping
+	// so the handler can map it to a server error instead of a client validation error.
+	ErrUniqueAttributeLookupFailed = errors.New("unique attribute lookup failed")
+	// ErrInvalidUserAttribute is returned when a user attribute is not valid for any of the allowed user types.
+	ErrInvalidUserAttribute = errors.New("invalid user attribute")
+
+	// ErrOAuthInvalidRedirectURI is returned when the redirect URI is invalid.
+	ErrOAuthInvalidRedirectURI = errors.New("invalid redirect URI")
+	// ErrOAuthRedirectURIFragmentNotAllowed is returned when a redirect URI contains a fragment.
+	ErrOAuthRedirectURIFragmentNotAllowed = errors.New("redirect URI must not contain a fragment")
+	// ErrOAuthAuthCodeRequiresRedirectURIs is returned when authorization_code grant has no redirect URIs.
+	ErrOAuthAuthCodeRequiresRedirectURIs = errors.New("authorization_code grant requires redirect URIs")
+	// ErrOAuthInvalidGrantType is returned when an unsupported grant type is specified.
+	ErrOAuthInvalidGrantType = errors.New("invalid grant type")
+	// ErrOAuthInvalidResponseType is returned when an unsupported response type is specified.
+	ErrOAuthInvalidResponseType = errors.New("invalid response type")
+	// ErrOAuthClientCredentialsCannotUseResponseTypes is returned when client_credentials uses response types.
+	ErrOAuthClientCredentialsCannotUseResponseTypes = errors.New("client_credentials grant cannot use response types")
+	// ErrOAuthAuthCodeRequiresCodeResponseType is returned when authorization_code grant lacks code response type.
+	ErrOAuthAuthCodeRequiresCodeResponseType = errors.New("authorization_code grant requires code response type")
+	// ErrOAuthRefreshTokenRequiresTokenIssuingGrant is returned when refresh_token is set without a
+	// token-issuing grant (authorization_code or ciba).
+	ErrOAuthRefreshTokenRequiresTokenIssuingGrant = errors.New(
+		"refresh_token grant type requires a token-issuing grant type")
+	// ErrOAuthPKCERequiresAuthCode is returned when PKCE is enabled without authorization_code grant.
+	ErrOAuthPKCERequiresAuthCode = errors.New("PKCE requires authorization_code grant type")
+	// ErrOAuthResponseTypesRequireAuthCode is returned when response types are set without authorization_code grant.
+	ErrOAuthResponseTypesRequireAuthCode = errors.New("response types require authorization_code grant type")
+	// ErrOAuthInvalidTokenEndpointAuthMethod is returned when an unsupported auth method is specified.
+	ErrOAuthInvalidTokenEndpointAuthMethod = errors.New("invalid token endpoint auth method")
+	// ErrOAuthDefaultAudienceTooLong is returned when the access token default audience exceeds the maximum length.
+	ErrOAuthDefaultAudienceTooLong = errors.New("default audience exceeds the maximum allowed length")
+	// ErrOAuthPrivateKeyJWTRequiresCertificate is returned when private_key_jwt is used without a certificate.
+	ErrOAuthPrivateKeyJWTRequiresCertificate = errors.New("private_key_jwt requires a certificate")
+	// ErrOAuthCertificateRequiresClientID is returned when a certificate is provided without an OAuth client ID.
+	ErrOAuthCertificateRequiresClientID = errors.New("certificate requires an OAuth client ID")
+	// ErrOAuthPrivateKeyJWTCannotHaveClientSecret is returned when private_key_jwt is used with a client secret.
+	ErrOAuthPrivateKeyJWTCannotHaveClientSecret = errors.New("private_key_jwt cannot have a client secret")
+	// ErrOAuthNoneAuthRequiresPublicClient is returned when none auth method is used without a public client.
+	ErrOAuthNoneAuthRequiresPublicClient = errors.New("none auth method requires a public client")
+	// ErrOAuthNoneAuthCannotHaveSecret is returned when none auth method is used with a client secret.
+	ErrOAuthNoneAuthCannotHaveSecret = errors.New("none auth method cannot have a client secret")
+	// ErrOAuthClientCredentialsCannotUseNoneAuth is returned when client_credentials uses none auth method.
+	ErrOAuthClientCredentialsCannotUseNoneAuth = errors.New("client_credentials cannot use none auth method")
+	// ErrOAuthClientJWTBearerCannotUseNoneAuth is returned when the jwt-bearer grant uses none auth method.
+	// The jwt-bearer (ID-JAG) grant relies on client_id binding and requires a confidential client.
+	ErrOAuthClientJWTBearerCannotUseNoneAuth = errors.New("jwt-bearer grant cannot use none auth method")
+	// ErrOAuthClientIDJAGCannotUseNoneAuth is returned when an ID-JAG configuration uses none auth method.
+	// Requesting ID-JAGs requires a confidential client.
+	ErrOAuthClientIDJAGCannotUseNoneAuth = errors.New("ID-JAG configuration cannot use none auth method")
+	// ErrOAuthPublicClientMustUseNoneAuth is returned when a public client uses an auth method other than none.
+	ErrOAuthPublicClientMustUseNoneAuth = errors.New("public client must use none auth method")
+	// ErrOAuthPublicClientMustHavePKCE is returned when a public client does not have PKCE required.
+	ErrOAuthPublicClientMustHavePKCE = errors.New("public client must have PKCE required")
+
+	// ErrCertValueRequired is returned when a certificate value is missing.
+	ErrCertValueRequired = errors.New("certificate value is required")
+	// ErrCertInvalidJWKSURI is returned when the JWKS URI is invalid.
+	ErrCertInvalidJWKSURI = errors.New("invalid JWKS URI")
+	// ErrCertInvalidType is returned when the certificate type is invalid.
+	ErrCertInvalidType = errors.New("invalid certificate type")
+
+	// ErrOAuthUserInfoUnsupportedSigningAlg is returned when the userinfo signing algorithm is not supported.
+	ErrOAuthUserInfoUnsupportedSigningAlg = errors.New("unsupported userinfo signing algorithm")
+	// ErrOAuthUserInfoUnsupportedEncryptionAlg is returned when the userinfo encryption algorithm is not supported.
+	ErrOAuthUserInfoUnsupportedEncryptionAlg = errors.New("unsupported userinfo encryption algorithm")
+	// ErrOAuthUserInfoUnsupportedEncryptionEnc is returned when the userinfo content-encryption alg is not supported.
+	ErrOAuthUserInfoUnsupportedEncryptionEnc = errors.New("unsupported userinfo content-encryption algorithm")
+	// ErrOAuthUserInfoEncryptionAlgRequiresEnc is returned when encryptionAlg is set without encryptionEnc.
+	ErrOAuthUserInfoEncryptionAlgRequiresEnc = errors.New(
+		"userinfo encryptionEnc is required when encryptionAlg is set")
+	// ErrOAuthUserInfoEncryptionEncRequiresAlg is returned when encryptionEnc is set without encryptionAlg.
+	ErrOAuthUserInfoEncryptionEncRequiresAlg = errors.New(
+		"userinfo encryptionAlg is required when encryptionEnc is set")
+	// ErrOAuthUserInfoEncryptionRequiresCertificate is returned when userinfo encryption has no certificate.
+	ErrOAuthUserInfoEncryptionRequiresCertificate = errors.New(
+		"userinfo encryption requires a certificate (JWKS or JWKS_URI)")
+	// ErrOAuthUserInfoJWKSURINotSSRFSafe is returned when the JWKS URI fails SSRF safety checks.
+	ErrOAuthUserInfoJWKSURINotSSRFSafe = errors.New("userinfo JWKS URI must be a publicly reachable HTTPS URL")
+	// ErrOAuthUserInfoUnsupportedResponseType is returned when an unsupported userinfo response type is specified.
+	ErrOAuthUserInfoUnsupportedResponseType = errors.New("unsupported userinfo response type")
+	// ErrOAuthUserInfoJWERequiresEncryption is returned when responseType is JWE but encryption fields are missing.
+	ErrOAuthUserInfoJWERequiresEncryption = errors.New(
+		"encryptionAlg and encryptionEnc are required when userinfo responseType is JWE")
+	// ErrOAuthUserInfoNestedJWTRequiresAll is returned when responseType is NESTED_JWT but encryption is missing.
+	ErrOAuthUserInfoNestedJWTRequiresAll = errors.New(
+		"encryptionAlg and encryptionEnc are required when userinfo responseType is NESTED_JWT")
+	// ErrOAuthUserInfoAlgRequiresResponseType is returned when algorithm fields
+	// are set without an explicit responseType.
+	ErrOAuthUserInfoAlgRequiresResponseType = errors.New(
+		"userinfo responseType is required when signingAlg or encryptionAlg is set")
+
+	// ErrOAuthIDTokenUnsupportedEncryptionAlg is returned when the ID token encryption algorithm is not supported.
+	ErrOAuthIDTokenUnsupportedEncryptionAlg = errors.New("unsupported ID token encryption algorithm")
+	// ErrOAuthIDTokenUnsupportedEncryptionEnc is returned when the ID token content-encryption
+	// algorithm is not supported.
+	ErrOAuthIDTokenUnsupportedEncryptionEnc = errors.New("unsupported ID token content-encryption algorithm")
+	// ErrOAuthIDTokenEncryptionAlgRequiresEnc is returned when encryptionAlg is set without encryptionEnc.
+	ErrOAuthIDTokenEncryptionAlgRequiresEnc = errors.New(
+		"idToken encryptionEnc is required when encryptionAlg is set")
+	// ErrOAuthIDTokenEncryptionEncRequiresAlg is returned when encryptionEnc is set without encryptionAlg.
+	ErrOAuthIDTokenEncryptionEncRequiresAlg = errors.New(
+		"idToken encryptionAlg is required when encryptionEnc is set")
+	// ErrOAuthIDTokenEncryptionRequiresCertificate is returned when ID token encryption has no certificate.
+	ErrOAuthIDTokenEncryptionRequiresCertificate = errors.New(
+		"idToken encryption requires a certificate (JWKS or JWKS_URI)")
+	// ErrOAuthIDTokenJWKSURINotSSRFSafe is returned when the JWKS URI fails SSRF safety checks.
+	ErrOAuthIDTokenJWKSURINotSSRFSafe = errors.New("idToken JWKS URI must be a publicly reachable HTTPS URL")
+	// ErrOAuthIDTokenUnsupportedResponseType is returned when an unsupported ID token response type is specified.
+	ErrOAuthIDTokenUnsupportedResponseType = errors.New("unsupported ID token response type")
+	// ErrOAuthIDTokenEncryptionFieldsNotAllowed is returned when encryption fields are set for JWT responseType.
+	ErrOAuthIDTokenEncryptionFieldsNotAllowed = errors.New(
+		"idToken encryptionAlg and encryptionEnc must not be set when responseType is JWT")
+)
+
+// Certificate operation labels used in CertOperationError.
+const (
+	CertOpCreate   = "create"
+	CertOpUpdate   = "update"
+	CertOpDelete   = "delete"
+	CertOpRetrieve = "retrieve"
+)
+
+// CertOperationError wraps an underlying cert.Service error along with the operation that
+// produced it and the reference type involved.
+type CertOperationError struct {
+	Operation  string
+	RefType    cert.CertificateReferenceType
+	Underlying *tidcommon.ServiceError
+}
+
+// Error implements the error interface.
+func (e *CertOperationError) Error() string {
+	if e.Underlying != nil {
+		return e.Underlying.ErrorDescription.DefaultValue
+	}
+	return "certificate operation failed"
+}
+
+// IsClientError reports whether the underlying cert service error is a client error.
+func (e *CertOperationError) IsClientError() bool {
+	return e.Underlying != nil && e.Underlying.Type == tidcommon.ClientErrorType
+}
+
+// FlowMismatchError is returned when a flow reached from one of the inbound client's configured flows
+// does not align with the inbound client's per-type flow ID (registration/recovery). SourceFlowType
+// is the type of the client-level flow whose flow reached the mismatched reference; FlowType
+// is the type of the referenced flow.
+type FlowMismatchError struct {
+	SourceFlowType providers.FlowType
+	FlowType       providers.FlowType
+	msg            string
+}
+
+// Error implements the error interface.
+func (e *FlowMismatchError) Error() string {
+	return e.msg
+}

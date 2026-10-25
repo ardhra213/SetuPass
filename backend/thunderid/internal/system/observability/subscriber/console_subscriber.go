@@ -1,0 +1,130 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package subscriber
+
+import (
+	"context"
+
+	"github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/observability/adapter"
+	"github.com/thunder-id/thunderid/internal/system/observability/event"
+	"github.com/thunder-id/thunderid/internal/system/observability/formatter"
+	"github.com/thunder-id/thunderid/internal/system/utils"
+	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
+)
+
+const consoleSubscriberComponentName = "ConsoleSubscriber"
+
+// ConsoleSubscriber writes observability events to the console.
+// It supports category-based filtering and JSON formatting.
+type ConsoleSubscriber struct {
+	id         string
+	categories []event.EventCategory
+	formatter  formatter.FormatterInterface
+	adapter    adapter.OutputAdapterInterface
+	logger     *log.Logger
+}
+
+var _ SubscriberInterface = (*ConsoleSubscriber)(nil)
+
+// init registers the console subscriber factory with the global registry.
+// This runs before main() and only registers the factory function.
+// No configuration access or instance creation happens here.
+func init() {
+	RegisterSubscriberFactory("console", func() SubscriberInterface {
+		return NewConsoleSubscriber()
+	})
+}
+
+// NewConsoleSubscriber creates a new console subscriber instance.
+func NewConsoleSubscriber() *ConsoleSubscriber {
+	return &ConsoleSubscriber{}
+}
+
+// IsEnabled checks if the console subscriber should be activated based on configuration.
+func (cs *ConsoleSubscriber) IsEnabled() bool {
+	return config.GetServerRuntime().Config.Observability.Output.Console.Enabled
+}
+
+// Initialize sets up the console subscriber with the provided configuration.
+func (cs *ConsoleSubscriber) Initialize() error {
+	// Get config directly from config package (avoid import cycle)
+	consoleConfig := config.GetServerRuntime().Config.Observability.Output.Console
+
+	// Create formatter based on config using the Initialize pattern
+	fmtr := formatter.Initialize(consoleConfig.Format)
+
+	// Create console adapter using the Initialize pattern
+	adptr := adapter.InitializeConsoleAdapter()
+
+	// Set categories - convert strings to EventCategory
+	cs.categories = convertCategories(consoleConfig.Categories)
+	if len(cs.categories) == 0 {
+		cs.categories = []event.EventCategory{event.CategoryAll}
+	}
+
+	cs.logger = log.GetLogger().With(log.String(log.LoggerKeyComponentName, consoleSubscriberComponentName))
+
+	// Subscriber initialization runs during application startup, outside any request.
+	ctx := context.Background()
+
+	id, err := utils.GenerateUUIDv7()
+	if err != nil {
+		cs.logger.Error(ctx, "failed to generate UUID for console subscriber", log.Error(err))
+		return err
+	}
+	cs.id = id
+
+	cs.formatter = fmtr
+	cs.adapter = adptr
+
+	cs.logger.Debug(ctx, "Console subscriber initialized",
+		log.String("format", consoleConfig.Format),
+		log.Int("categories", len(cs.categories)))
+
+	return nil
+}
+
+// GetID returns the unique identifier for this subscriber.
+func (cs *ConsoleSubscriber) GetID() string {
+	return cs.id
+}
+
+// GetCategories returns the categories this subscriber is interested in.
+func (cs *ConsoleSubscriber) GetCategories() []event.EventCategory {
+	if len(cs.categories) > 0 {
+		return cs.categories
+	}
+	// Default: all categories
+	return []event.EventCategory{event.CategoryAll}
+}
+
+// OnEvent is called when a new event is published.
+func (cs *ConsoleSubscriber) OnEvent(evt *providers.Event) error {
+	return processEvent(evt, cs.formatter, cs.adapter, cs.logger, "console")
+}
+
+// Close closes the subscriber and releases resources.
+func (cs *ConsoleSubscriber) Close() error {
+	// Subscriber shutdown runs during application teardown, outside any request.
+	ctx := context.Background()
+
+	cs.logger.Info(ctx, "Closing console subscriber", log.String("subscriberID", cs.id))
+
+	// Flush and close adapter
+	if cs.adapter != nil {
+		if err := cs.adapter.Flush(); err != nil {
+			cs.logger.Error(ctx, "Failed to flush console adapter", log.Error(err))
+		}
+
+		if err := cs.adapter.Close(); err != nil {
+			cs.logger.Error(ctx, "Failed to close console adapter", log.Error(err))
+			return err
+		}
+	}
+
+	cs.logger.Info(ctx, "Console subscriber closed", log.String("subscriberID", cs.id))
+	return nil
+}

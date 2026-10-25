@@ -1,0 +1,2 @@
+ok  	github.com/mosip/esignet/internal/engine	3.557s
+ok  	github.com/thunder-id/thunderid/internal/oauth/oauth2/granthandlers	1.247s

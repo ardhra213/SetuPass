@@ -1,0 +1,93 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package userinfo
+
+import (
+	"net/http"
+	"net/url"
+	"testing"
+
+	engineconfig "github.com/thunder-id/thunderid/pkg/thunderidengine/config"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/actorprovider"
+	"github.com/thunder-id/thunderid/internal/system/config"
+	"github.com/thunder-id/thunderid/tests/mocks/attributecachemock"
+	"github.com/thunder-id/thunderid/tests/mocks/entityprovidermock"
+	"github.com/thunder-id/thunderid/tests/mocks/inboundclientmock"
+	"github.com/thunder-id/thunderid/tests/mocks/jose/jwtmock"
+	"github.com/thunder-id/thunderid/tests/mocks/oauth/oauth2/discoverymock"
+	"github.com/thunder-id/thunderid/tests/mocks/oauth/oauth2/dpopmock"
+	"github.com/thunder-id/thunderid/tests/mocks/oauth/oauth2/tokenservicemock"
+	"github.com/thunder-id/thunderid/tests/testhelpers"
+)
+
+type InitTestSuite struct {
+	suite.Suite
+	mockJWTService            *jwtmock.JWTServiceInterfaceMock
+	mockTokenValidator        *tokenservicemock.TokenValidatorInterfaceMock
+	mockInboundClient         *inboundclientmock.InboundClientServiceInterfaceMock
+	mockEntityProvider        *entityprovidermock.EntityProviderInterfaceMock
+	mockAttributeCacheService *attributecachemock.AttributeCacheServiceInterfaceMock
+	mockDiscoveryService      *discoverymock.DiscoveryServiceInterfaceMock
+	mockDPoPVerifier          *dpopmock.VerifierInterfaceMock
+}
+
+func TestInitTestSuite(t *testing.T) {
+	suite.Run(t, new(InitTestSuite))
+}
+
+func (suite *InitTestSuite) SetupTest() {
+	suite.mockJWTService = jwtmock.NewJWTServiceInterfaceMock(suite.T())
+	suite.mockTokenValidator = tokenservicemock.NewTokenValidatorInterfaceMock(suite.T())
+	suite.mockInboundClient = inboundclientmock.NewInboundClientServiceInterfaceMock(suite.T())
+	suite.mockEntityProvider = entityprovidermock.NewEntityProviderInterfaceMock(suite.T())
+	suite.mockAttributeCacheService = attributecachemock.NewAttributeCacheServiceInterfaceMock(suite.T())
+	suite.mockDiscoveryService = discoverymock.NewDiscoveryServiceInterfaceMock(suite.T())
+	suite.mockDPoPVerifier = dpopmock.NewVerifierInterfaceMock(suite.T())
+	config.ResetServerRuntime()
+	_ = config.InitializeServerRuntime(
+		"test-home",
+		&config.Config{
+			OAuth: config.OAuthConfig{
+				DPoP: engineconfig.DPoPConfig{
+					AllowedAlgs: []string{"ES256", "PS256"},
+				},
+			},
+		},
+	)
+}
+
+func (suite *InitTestSuite) TestInitialize() {
+	mux := http.NewServeMux()
+
+	service := Initialize(mux, suite.mockJWTService, nil, nil,
+		suite.mockTokenValidator,
+		actorprovider.Initialize(suite.mockInboundClient, suite.mockEntityProvider, noopAuthnMgr(), nil),
+		suite.mockAttributeCacheService, suite.mockDiscoveryService, suite.mockDPoPVerifier, testhelpers.OAuthConfig())
+
+	assert.NotNil(suite.T(), service)
+}
+
+func (suite *InitTestSuite) TestInitialize_RegistersRoutes() {
+	mux := http.NewServeMux()
+
+	Initialize(mux, suite.mockJWTService, nil, nil,
+		suite.mockTokenValidator,
+		actorprovider.Initialize(suite.mockInboundClient, suite.mockEntityProvider, noopAuthnMgr(), nil),
+		suite.mockAttributeCacheService, suite.mockDiscoveryService, suite.mockDPoPVerifier, testhelpers.OAuthConfig())
+
+	// Verify that the routes are registered by attempting to get a handler for them.
+	// The pattern includes the method because of CORS middleware wrapping.
+	_, pattern := mux.Handler(&http.Request{Method: "GET", URL: &url.URL{Path: "/oauth2/userinfo"}})
+	assert.Contains(suite.T(), pattern, "/oauth2/userinfo")
+
+	_, pattern = mux.Handler(&http.Request{Method: "POST", URL: &url.URL{Path: "/oauth2/userinfo"}})
+	assert.Contains(suite.T(), pattern, "/oauth2/userinfo")
+
+	_, pattern = mux.Handler(&http.Request{Method: "OPTIONS", URL: &url.URL{Path: "/oauth2/userinfo"}})
+	assert.Contains(suite.T(), pattern, "/oauth2/userinfo")
+}

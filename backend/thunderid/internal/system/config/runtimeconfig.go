@@ -1,0 +1,105 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package config
+
+import (
+	"context"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/thunder-id/thunderid/internal/system/log"
+)
+
+// ServerRuntime holds the runtime configuration for the server.
+type ServerRuntime struct {
+	ServerHome            string `yaml:"server_home"`
+	GateClientLoginURL    *url.URL
+	GateClientCallbackURL *url.URL
+	Config                Config `yaml:"config"`
+}
+
+var (
+	runtimeConfig *ServerRuntime
+	once          sync.Once
+)
+
+// InitializeServerRuntime initializes the server runtime configurations.
+func InitializeServerRuntime(serverHome string, config *Config) error {
+	once.Do(func() {
+		loginPath := config.GateClient.LoginPath
+		if strings.TrimSpace(loginPath) == "" {
+			loginPath = "/signin"
+		}
+		callbackPath := config.GateClient.CallbackPath
+		if strings.TrimSpace(callbackPath) == "" {
+			callbackPath = "/callback"
+		}
+
+		portStr := strconv.Itoa(config.GateClient.Port)
+		hostWithPort := net.JoinHostPort(config.GateClient.Hostname, portStr)
+
+		baseURL := &url.URL{
+			Scheme: config.GateClient.Scheme,
+			Host:   hostWithPort,
+		}
+
+		parsedPath, err := url.Parse(loginPath)
+		if err != nil || parsedPath == nil {
+			// Runtime initialization runs during application startup, outside any request.
+			log.GetLogger().Warn(context.Background(),
+				"Invalid gate client login path configured. Falling back to default '/signin'",
+				log.String("configuredPath", loginPath),
+				log.Error(err),
+			)
+			parsedPath = &url.URL{Path: "/signin"}
+		}
+
+		parsedCallbackPath, err := url.Parse(callbackPath)
+		if err != nil || parsedCallbackPath == nil {
+			// Runtime initialization runs during application startup, outside any request.
+			log.GetLogger().Warn(context.Background(),
+				"Invalid gate client callback path configured. Falling back to default '/callback'",
+				log.String("configuredPath", callbackPath),
+				log.Error(err),
+			)
+			parsedCallbackPath = &url.URL{Path: "/callback"}
+		}
+
+		parsedURL := baseURL.ResolveReference(parsedPath)
+		parsedCallbackURL := baseURL.ResolveReference(parsedCallbackPath)
+
+		runtimeConfig = &ServerRuntime{
+			ServerHome:            serverHome,
+			GateClientLoginURL:    parsedURL,
+			GateClientCallbackURL: parsedCallbackURL,
+			Config:                *config,
+		}
+	})
+	return nil
+}
+
+// GetServerRuntime returns the server runtime configurations.
+func GetServerRuntime() *ServerRuntime {
+	if runtimeConfig == nil {
+		panic("Server runtime is not initialized")
+	}
+	return runtimeConfig
+}
+
+// IsServerRuntimeInitialized reports whether the server runtime has been initialized, without
+// panicking. Useful for callers that have a sensible fallback when config isn't loaded yet
+// (e.g. in unit tests that don't call InitializeServerRuntime).
+func IsServerRuntimeInitialized() bool {
+	return runtimeConfig != nil
+}
+
+// ResetServerRuntime resets the server runtime.
+// This should only be used in tests to reset the singleton state.
+func ResetServerRuntime() {
+	runtimeConfig = nil
+	once = sync.Once{}
+}

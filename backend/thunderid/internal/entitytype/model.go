@@ -1,0 +1,121 @@
+// Copyright 2025 The ThunderID Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package entitytype
+
+import (
+	"encoding/json"
+)
+
+// TypeCategory identifies the kind of entity that an entity type describes.
+type TypeCategory string
+
+const (
+	// TypeCategoryUser categorizes schemas used to native user entities.
+	TypeCategoryUser TypeCategory = "user"
+	// TypeCategoryAgent categorizes schemas used to native agent entities.
+	TypeCategoryAgent TypeCategory = "agent"
+)
+
+// DefaultAgentTypeName is the only agent type name allowed; agent types are restricted
+// to a single 'default' schema.
+const DefaultAgentTypeName = "default"
+
+// IsValid reports whether the category is one of the known fixed values.
+func (c TypeCategory) IsValid() bool {
+	return c == TypeCategoryUser || c == TypeCategoryAgent
+}
+
+// Note: Complex JSON schema type definitions (array, boolean, number, object, schema, string)
+// are kept in the model/ subdirectory to maintain clean separation and better organization.
+// This file contains only the simple DTOs and API request/response structures.
+
+// SystemAttributes holds system-level metadata for an entity type.
+// Stored as a JSON column for extensibility — new fields can be added without DB migrations.
+type SystemAttributes struct {
+	Display string `json:"display,omitempty" yaml:"display,omitempty"`
+}
+
+// EntityType represents an entity-type schema definition.
+type EntityType struct {
+	ID                    string            `json:"id,omitempty" yaml:"id,omitempty"`
+	Category              TypeCategory      `json:"-" yaml:"category,omitempty"`
+	Name                  string            `json:"name,omitempty" yaml:"name"`
+	OUID                  string            `json:"ouId" yaml:"ouId"`
+	OUHandle              string            `json:"ouHandle,omitempty" yaml:"-"`
+	AllowSelfRegistration bool              `json:"allowSelfRegistration" yaml:"allowSelfRegistration,omitempty"`
+	SystemAttributes      *SystemAttributes `json:"systemAttributes,omitempty" yaml:"systemAttributes,omitempty"`
+	Schema                json.RawMessage   `json:"schema,omitempty" yaml:"schema"`
+}
+
+// EntityTypeListItem represents a simplified entity type for listing operations.
+// Category is internal — see EntityType for the rationale.
+type EntityTypeListItem struct {
+	ID                    string            `json:"id,omitempty"`
+	Category              TypeCategory      `json:"-"`
+	Name                  string            `json:"name,omitempty"`
+	OUID                  string            `json:"ouId"`
+	OUHandle              string            `json:"ouHandle,omitempty"`
+	AllowSelfRegistration bool              `json:"allowSelfRegistration"`
+	SystemAttributes      *SystemAttributes `json:"systemAttributes,omitempty"`
+	IsReadOnly            bool              `json:"isReadOnly"`
+}
+
+// Link represents a hypermedia link in the API response.
+type Link struct {
+	Href string `json:"href,omitempty"`
+	Rel  string `json:"rel,omitempty"`
+}
+
+// EntityTypeListResponse represents the response for listing entity types with pagination.
+type EntityTypeListResponse struct {
+	TotalResults int                  `json:"totalResults"`
+	StartIndex   int                  `json:"startIndex"`
+	Count        int                  `json:"count"`
+	Types        []EntityTypeListItem `json:"types"`
+	Links        []Link               `json:"links"`
+}
+
+// CreateEntityTypeRequest represents the request body for creating an entity type.
+type CreateEntityTypeRequest struct {
+	Name                  string            `json:"name" native:"required,min=1,max=100"`
+	OUID                  string            `json:"ouId" native:"required"`
+	AllowSelfRegistration bool              `json:"allowSelfRegistration,omitempty"`
+	SystemAttributes      *SystemAttributes `json:"systemAttributes,omitempty"`
+	Schema                json.RawMessage   `json:"schema" native:"required"`
+}
+
+// CreateEntityTypeRequestWithID represents the service-level request for creating an entity type,
+// including an optional ID.
+type CreateEntityTypeRequestWithID struct {
+	ID                    string            `json:"id,omitempty" yaml:"id,omitempty"`
+	Name                  string            `json:"name" native:"required,min=1,max=100"`
+	OUID                  string            `json:"ouId" native:"required"`
+	OUHandle              string            `json:"ouHandle,omitempty"`
+	AllowSelfRegistration bool              `json:"allowSelfRegistration,omitempty"`
+	SystemAttributes      *SystemAttributes `json:"systemAttributes,omitempty"`
+	Schema                json.RawMessage   `json:"schema" native:"required"`
+}
+
+// UpdateEntityTypeRequest represents the request body for updating an entity type.
+type UpdateEntityTypeRequest struct {
+	Name                  string            `json:"name" native:"required,min=1,max=100"`
+	OUID                  string            `json:"ouId" native:"required"`
+	OUHandle              string            `json:"ouHandle,omitempty"`
+	AllowSelfRegistration bool              `json:"allowSelfRegistration,omitempty"`
+	SystemAttributes      *SystemAttributes `json:"systemAttributes,omitempty"`
+	Schema                json.RawMessage   `json:"schema"`
+}
+
+// EntityTypeRequestWithID represents the request structure for creating an entity type from
+// file-based config.
+type EntityTypeRequestWithID struct {
+	ID                    string            `yaml:"id"`
+	Category              TypeCategory      `yaml:"category,omitempty"`
+	Name                  string            `yaml:"name"`
+	OUID                  string            `yaml:"ouId,omitempty"`
+	OUHandle              string            `yaml:"ouHandle,omitempty"`
+	AllowSelfRegistration bool              `yaml:"allowSelfRegistration,omitempty"`
+	SystemAttributes      *SystemAttributes `yaml:"systemAttributes,omitempty"`
+	Schema                interface{}       `yaml:"schema"`
+}

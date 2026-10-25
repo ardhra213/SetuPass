@@ -1,0 +1,6 @@
+SetuPass submission source — Team 3 brain cells
+Read README.md first.
+New reviewer machine: follow docs/REVIEWER_SETUP.md.
+Existing working team installation: no reinstall is needed for submission.
+The root numbered scripts are for the recovered installation only. If using this copy of those scripts, set SETUPASS_EXISTING_ROOT to the existing Windows Starter folder in your PowerShell session first. They default to a user-profile folder and refuse missing keystore state.
+Do not replace the team's running project, database or keys with this submission directory.
